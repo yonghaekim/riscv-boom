@@ -77,6 +77,9 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   val rob_idx          = UInt(robAddrSz.W)
   val ldq_idx          = UInt(ldqAddrSz.W)
   val stq_idx          = UInt(stqAddrSz.W)
+  //yh+begin
+  val ssq_idx          = UInt(ssqAddrSz.W)
+  //yh+end
   val rxq_idx          = UInt(log2Ceil(numRxqEntries).W)
   val pdst             = UInt(maxPregSz.W)
   val prs1             = UInt(maxPregSz.W)
@@ -100,6 +103,12 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   val is_amo           = Bool()
   val uses_ldq         = Bool()
   val uses_stq         = Bool()
+  //yh+begin
+  val uses_ssq         = Bool()
+  val needCC		       = Bool()
+	val is_edgld				 = Bool()
+	val edg_cmd					 = UInt(3.W)
+  //yh+end
   val is_sys_pc2epc    = Bool()                      // Is a ECall or Breakpoint -- both set EPC to PC.
   val is_unique        = Bool()                      // only allow this instruction in the pipeline, wait for STQ to
                                                      // drain, clear fetcha fter it (tell ROB to un-ready until empty)

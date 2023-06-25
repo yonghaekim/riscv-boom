@@ -122,6 +122,14 @@ trait ScalarOpConstants
   val RT_X     = 2.U(2.W) // not-a-register (but shouldn't get a busy-bit, etc.)
                              // TODO rename RT_NAR
 
+  //yh+begin
+  val EDG_CHK = 1.U(3.W) // echk
+  val EDG_STR = 2.U(3.W) // estr
+  val EDG_CLR = 3.U(3.W) // eclr
+  val EDG_ACT = 4.U(3.W) // eact
+  val EDG_DEA = 5.U(3.W) // edea
+  //yh+end
+
   // Micro-op opcodes
   // TODO change micro-op opcodes into using enum
   val UOPC_SZ = 7
@@ -258,6 +266,10 @@ trait ScalarOpConstants
 
   val uopMOV       = 109.U(UOPC_SZ.W) // conditional mov decoded from "add rd, x0, rs2"
 
+	//yh+begin
+  val uopTAGC      = 120.U(UOPC_SZ.W) 
+	//yh+end
+
   // The Bubble Instruction (Machine generated NOP)
   // Insert (XOR x0,x0,x0) which is different from software compiler
   // generated NOPs which are (ADDI x0, x0, 0).
@@ -275,6 +287,12 @@ trait ScalarOpConstants
     uop.uses_ldq   := false.B
     uop.pdst       := 0.U
     uop.dst_rtype  := RT_X
+    //yh+begin
+    uop.uses_ssq   := false.B
+    uop.needCC 		 := false.B
+    uop.is_edgld   := false.B
+    uop.edg_cmd    := 0.U
+    //yh+end
 
     val cs = Wire(new boom.common.CtrlSignals())
     cs             := DontCare // Overridden in the following lines

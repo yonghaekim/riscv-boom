@@ -33,6 +33,10 @@ case class BoomCoreParams(
     IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=1)),
   numLdqEntries: Int = 16,
   numStqEntries: Int = 16,
+  //yh+begin
+  tagWidth:      Int = 16,
+  wayAddrSz:     Int = 11, // up to 1024 ways are supported
+  //yh+end
   numIntPhysRegisters: Int = 96,
   numFpPhysRegisters: Int = 64,
   maxBrCount: Int = 4,
@@ -137,6 +141,85 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
     Some(CustomCSR(chickenCSRId, mask, Some(init)))
   }
   def disableOOO = getOrElse(chickenCSR, _.value(3), true.B)
+
+  //yh+begin
+  override def cptConfigCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(cptConfigCSRId, mask, Some(init)))
+  }
+
+  override def numInstCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numInstCSRId, mask, Some(init)))
+  }
+
+  override def numTagcCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numTagcCSRId, mask, Some(init)))
+  }
+
+  override def numEchkCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEchkCSRId, mask, Some(init)))
+  }
+
+  override def numEstrCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEstrCSRId, mask, Some(init)))
+  }
+
+  override def numEclrCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEclrCSRId, mask, Some(init)))
+  }
+
+  override def numEactCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEactCSRId, mask, Some(init)))
+  }
+
+  override def numEdeaCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEdeaCSRId, mask, Some(init)))
+  }
+
+  override def ldstTrafficCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(ldstTrafficCSRId, mask, Some(init)))
+  }
+
+  override def edgeTrafficCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(edgeTrafficCSRId, mask, Some(init)))
+  }
+
+  override def numEcacheHitCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numEcacheHitCSRId, mask, Some(init)))
+  }
+	//yh+end
 }
 
 /**
@@ -165,6 +248,11 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val numRcqEntries = boomParams.numRCQEntries       // number of RoCC commit queue entries. This can be large since it just keeps a pdst
   val numLdqEntries = boomParams.numLdqEntries       // number of LAQ entries
   val numStqEntries = boomParams.numStqEntries       // number of SAQ/SDQ entries
+  //yh+begin
+  val numSsqEntries = boomParams.numStqEntries       // number of SSQ entries
+  val tagWidth      = boomParams.tagWidth            // Tag Width
+  val wayAddrSz     = boomParams.wayAddrSz           // Way address size
+  //yh+end
   val maxBrCount    = boomParams.maxBrCount          // number of branches we can speculate simultaneously
   val ftqSz         = boomParams.ftq.nEntries        // number of FTQ entries
   val numFetchBufferEntries = boomParams.numFetchBufferEntries // number of instructions that stored between fetch&decode
@@ -263,6 +351,10 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val ldqAddrSz       = log2Ceil(numLdqEntries)
   val stqAddrSz       = log2Ceil(numStqEntries)
   val lsuAddrSz       = ldqAddrSz max stqAddrSz
+  //yh+begin
+  val ssqAddrSz       = log2Ceil(numStqEntries)
+  require ((numSsqEntries-1) > coreWidth)
+  //yh+end
   val brTagSz         = log2Ceil(maxBrCount)
 
   require (numIntPhysRegs >= (32 + coreWidth))

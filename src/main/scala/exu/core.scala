@@ -497,6 +497,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
 
   //-------------------------------------------------------------
   // Decoders
+	//yh+begin
+	val user_priv = Reg(Bool())
+	user_priv := (csr.io.status.prv === 0.U /* User Priv */ ||
+								csr.io.status.prv === 3.U /* Machine Priv */)
+	//yh+end
 
   for (w <- 0 until coreWidth) {
     dec_valids(w)                      := io.ifu.fetchpacket.valid && dec_fbundle.uops(w).valid &&
@@ -506,7 +511,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     decode_units(w).io.csr_decode      <> csr.io.decode(w)
     decode_units(w).io.interrupt       := csr.io.interrupt
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
-
+    //yh+begin
+		//decode_units(w).io.enableCPT       := ((csr.io.status.prv === 0.U) /* User Priv */ && custom_csrs.cpt_config(62))
+		decode_units(w).io.enableCPT			 := (user_priv && custom_csrs.cpt_config(62))
+  	//decode_units(w).io.enableCPT			 := custom_csrs.cpt_config(0)
+    //yh+end
     dec_uops(w) := decode_units(w).io.deq.uop
   }
 
@@ -691,7 +700,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
                       (  !rob.io.ready
                       || ren_stalls(w)
                       || io.lsu.ldq_full(w) && dis_uops(w).uses_ldq
-                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      //yh-|| io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).edg_cmd === 0.U) //yh+
+                      //yh+begin
+                      || io.lsu.ssq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).edg_cmd =/= 0.U)
+                      //yh+end
                       || !dispatcher.io.ren_uops(w).ready
                       || wait_for_empty_pipeline(w)
                       || wait_for_rocc(w)
@@ -715,6 +728,9 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     // Dispatching instructions request load/store queue entries when they can proceed.
     dis_uops(w).ldq_idx := io.lsu.dis_ldq_idx(w)
     dis_uops(w).stq_idx := io.lsu.dis_stq_idx(w)
+    //yh+begin
+    dis_uops(w).ssq_idx := io.lsu.dis_ssq_idx(w)
+    //yh+end
   }
 
   //-------------------------------------------------------------
@@ -1023,10 +1039,25 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
       Causes.fetch_access.U,
       Causes.load_page_fault.U,
       Causes.store_page_fault.U,
-      Causes.fetch_page_fault.U)
+      //yh-Causes.fetch_page_fault.U)
+			//yh+begin
+      Causes.fetch_page_fault.U,
+      Causes.estr_fault.U)
+			//yh+end
 
   csr.io.tval := Mux(tval_valid,
     RegNext(encodeVirtualAddress(rob.io.com_xcpt.bits.badvaddr, rob.io.com_xcpt.bits.badvaddr)), 0.U)
+
+  //yh+begin
+  when (tval_valid) {
+    printf("[%d] Found tval_valid at core tval: %x\n",
+            debug_tsc_reg, csr.io.tval)
+    when (csr.io.cause === Causes.estr_fault.U) {
+      printf("[%d] Found estr_fault at core: %x\n",
+              debug_tsc_reg, csr.io.tval)
+    }
+  }
+  //yh+end
 
   // TODO move this function to some central location (since this is used elsewhere).
   def encodeVirtualAddress(a0: UInt, ea: UInt) =
@@ -1282,6 +1313,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   rob.io.lsu_clr_bsy    := io.lsu.clr_bsy
   rob.io.lsu_clr_unsafe := io.lsu.clr_unsafe
   rob.io.lxcpt          <> io.lsu.lxcpt
+  rob.io.lsu_clr_needCC := io.lsu.clr_needCC //yh+
 
   assert (!(csr.io.singleStep), "[core] single-step is unsupported.")
 
@@ -1321,6 +1353,47 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   if (usingFPU) {
     fp_pipeline.io.debug_tsc_reg := debug_tsc_reg
   }
+
+  //yh+begin
+  val cpt_csrs = Wire(new CptCSRs)
+  cpt_csrs.emt_base := custom_csrs.cpt_config(47,0)
+  cpt_csrs.num_ways := custom_csrs.cpt_config(59,48)
+
+  for (i <- 0 until memWidth) {
+    mem_units(i).io.lsu_cap_io <> io.lsu.cap_exe(i)
+    mem_units(i).io.cpt_csrs := cpt_csrs
+  }
+
+	printf("[%d] cpt_config: %x\n", debug_tsc_reg, custom_csrs.cpt_config)
+
+  io.lsu.cpt_csrs.enableCPT         	:= custom_csrs.cpt_config(62)
+  io.lsu.cpt_csrs.user_priv       		:= user_priv
+  rob.io.cpt_csrs.enableCPT         	:= custom_csrs.cpt_config(62)
+  rob.io.cpt_csrs.user_priv       		:= user_priv
+  io.lsu.cpt_csrs.num_ways         		:= custom_csrs.cpt_config(59,48)
+  rob.io.cpt_csrs.num_inst   			    := custom_csrs.num_inst
+  rob.io.cpt_csrs.num_tagc         	  := custom_csrs.num_tagc
+  io.lsu.cpt_csrs.num_echk   					:= custom_csrs.num_echk
+  io.lsu.cpt_csrs.num_estr   					:= custom_csrs.num_estr
+  io.lsu.cpt_csrs.num_eclr   					:= custom_csrs.num_eclr
+  io.lsu.cpt_csrs.num_eact   					:= custom_csrs.num_eact
+  io.lsu.cpt_csrs.num_edea   					:= custom_csrs.num_edea
+  io.lsu.cpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
+  io.lsu.cpt_csrs.edge_traffic     		:= custom_csrs.edge_traffic
+  io.lsu.cpt_csrs.num_ecache_hit   		:= custom_csrs.num_ecache_hit
+
+  csr.io.cpt_config       	:= custom_csrs.cpt_config
+  csr.io.num_inst           := rob.io.num_inst
+  csr.io.num_tagc           := rob.io.num_tagc
+  csr.io.num_echk           := io.lsu.num_echk
+  csr.io.num_estr           := io.lsu.num_estr
+  csr.io.num_eclr           := io.lsu.num_eclr
+  csr.io.num_eact           := io.lsu.num_eact
+  csr.io.num_edea           := io.lsu.num_edea
+  csr.io.ldst_traffic       := io.lsu.ldst_traffic
+  csr.io.edge_traffic     	:= io.lsu.edge_traffic
+  csr.io.num_ecache_hit    	:= io.lsu.num_ecache_hit
+  //yh+end
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------

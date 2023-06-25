@@ -35,6 +35,16 @@ import freechips.rocketchip.util.Str
 import boom.common._
 import boom.util._
 
+//yh+begin
+class ROBCPTCSRs(implicit p: Parameters) extends BoomBundle()(p)
+{
+  val enableCPT           = Bool()
+  val user_priv           = Bool()
+  val num_inst            = UInt(xLen.W)
+  val num_tagc            = UInt(xLen.W)
+}
+//yh+end
+
 /**
  * IO bundle to interact with the ROB
  *
@@ -71,6 +81,13 @@ class RobIo(
   // Unbusying ports for stores.
   // +1 for fpstdata
   val lsu_clr_bsy      = Input(Vec(memWidth + 1, Valid(UInt(robAddrSz.W))))
+
+  //yh+begin
+  val lsu_clr_needCC   = Input(Vec(memWidth+memWidth, Valid(UInt(robAddrSz.W))))
+  val cpt_csrs         = Input(new ROBCPTCSRs)
+  val num_inst         = Output(UInt(xLen.W))
+  val num_tagc         = Output(UInt(xLen.W))
+  //yh+end
 
   // Port for unmarking loads/stores as speculation hazards..
   val lsu_clr_unsafe   = Input(Vec(memWidth, Valid(UInt(robAddrSz.W))))
@@ -260,6 +277,23 @@ class Rob(
   val r_xcpt_badvaddr  = Reg(UInt(coreMaxAddrBits.W))
   io.flush_frontend := r_xcpt_val
 
+  //yh+begin
+  val enableCPT        		= RegInit(false.B)
+  val user_priv       		= RegInit(false.B)
+  val initCPT           	= Reg(Bool())
+  val num_inst            = Reg(UInt(xLen.W))
+  val num_tagc            = Reg(UInt(xLen.W))
+
+  enableCPT              	:= io.cpt_csrs.enableCPT
+  user_priv           		:= io.cpt_csrs.user_priv
+  initCPT                	:= io.cpt_csrs.enableCPT & !enableCPT
+  io.num_inst             := num_inst
+  io.num_tagc             := num_tagc
+
+  var temp_num_inst = num_inst
+  var temp_num_tagc = num_tagc
+  //yh+end
+
   //--------------------------------------------------
   // Utility
 
@@ -307,6 +341,7 @@ class Rob(
     val rob_val       = RegInit(VecInit(Seq.fill(numRobRows){false.B}))
     val rob_bsy       = Reg(Vec(numRobRows, Bool()))
     val rob_unsafe    = Reg(Vec(numRobRows, Bool()))
+    val rob_needCC    = Reg(Vec(numRobRows, Bool())) //yh+
     val rob_uop       = Reg(Vec(numRobRows, new MicroOp()))
     val rob_exception = Reg(Vec(numRobRows, Bool()))
     val rob_predicated = Reg(Vec(numRobRows, Bool())) // Was this instruction predicated out?
@@ -322,9 +357,19 @@ class Rob(
 
     when (io.enq_valids(w)) {
       rob_val(rob_tail)       := true.B
+      //yh-rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence ||
+      //yh-                             io.enq_uops(w).is_fencei)
+      //yh+begin
       rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence ||
-                                   io.enq_uops(w).is_fencei)
-      rob_unsafe(rob_tail)    := io.enq_uops(w).unsafe
+                                   io.enq_uops(w).is_fencei ||
+                                   io.enq_uops(w).edg_cmd =/= 0.U)
+      //yh+end
+      //yh-rob_unsafe(rob_tail)    := io.enq_uops(w).unsafe
+      //yh+begin
+      rob_unsafe(rob_tail)    := (io.enq_uops(w).unsafe &&
+                                  io.enq_uops(w).edg_cmd === 0.U)
+      //yh+end
+      rob_needCC(rob_tail)    := io.enq_uops(w).needCC //yh+
       rob_uop(rob_tail)       := io.enq_uops(w)
       rob_exception(rob_tail) := io.enq_uops(w).exception
       rob_predicated(rob_tail)   := false.B
@@ -372,6 +417,16 @@ class Rob(
         rob_unsafe(cidx) := false.B
       }
     }
+    //yh+begin
+    for (clr_rob_idx <- io.lsu_clr_needCC) {
+      when (clr_rob_idx.valid && MatchBank(GetBankIdx(clr_rob_idx.bits))) {
+        val cidx = GetRowIdx(clr_rob_idx.bits)
+        rob_needCC(cidx) := false.B
+        assert (rob_val(cidx) === true.B, "[rob] store writing back to invalid entry.")
+        assert (rob_needCC(cidx) === true.B, "[rob] store writing back to a not-needCC entry.")
+      }
+    }
+    //yh+end
 
 
     //-----------------------------------------------
@@ -389,7 +444,8 @@ class Rob(
 
     when (io.lxcpt.valid && MatchBank(GetBankIdx(io.lxcpt.bits.uop.rob_idx))) {
       rob_exception(GetRowIdx(io.lxcpt.bits.uop.rob_idx)) := true.B
-      when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING) {
+      //yh-when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING) {
+      when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING && io.lxcpt.bits.uop.edg_cmd =/= EDG_STR) { //yh+
         // In the case of a mem-ordering failure, the failing load will have been marked safe already.
         assert(rob_unsafe(GetRowIdx(io.lxcpt.bits.uop.rob_idx)),
           "An instruction marked as safe is causing an exception")
@@ -401,7 +457,16 @@ class Rob(
     // Commit or Rollback
 
     // Can this instruction commit? (the check for exceptions/rob_state happens later).
-    can_commit(w) := rob_val(rob_head) && !(rob_bsy(rob_head)) && !io.csr_stall
+    //yh-can_commit(w) := rob_val(rob_head) && !(rob_bsy(rob_head)) && !io.csr_stall
+    can_commit(w) := (rob_val(rob_head) && !rob_bsy(rob_head) && !io.csr_stall && !rob_needCC(rob_head)) //yh+
+
+    //yh+begin
+    //when (rob_val(rob_head) && !rob_bsy(rob_head) && !io.csr_stall) {
+    //  when (rob_needCC(rob_head)) {
+    //    printf("Couldn't commit because of needCC rob(%d)\n", rob_head)
+    //  }
+    //}
+    //yh+end
 
 
     // use the same "com_uop" for both rollback AND commit
@@ -433,6 +498,7 @@ class Rob(
     when (rbk_row) {
       rob_val(com_idx)       := false.B
       rob_exception(com_idx) := false.B
+      rob_needCC(com_idx)    := false.B //yh+
     }
 
     if (enableCommitMapTable) {
@@ -440,6 +506,7 @@ class Rob(
         for (i <- 0 until numRobRows) {
           rob_val(i) := false.B
           rob_bsy(i) := false.B
+          rob_needCC(i) := false.B //yh+
           rob_uop(i).debug_inst := BUBBLE
         }
       }
@@ -487,10 +554,12 @@ class Rob(
     //------------------------------------------------
     // Invalid entries are safe; thrown exceptions are unsafe.
     for (i <- 0 until numRobRows) {
-      rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i))
+      //yh-rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i))
+      rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i) || rob_needCC(i)) //yh+
     }
     // Read unsafe status of PNR row.
-    rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr))
+    //yh-rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr))
+    rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr) || rob_needCC(rob_pnr)) //yh+
 
     // -----------------------------------------------
     // debugging write ports that should not be synthesized
@@ -523,7 +592,18 @@ class Rob(
     }
     io.commit.debug_wdata(w) := rob_debug_wdata(rob_head)
 
+    //yh+begin
+    temp_num_inst = Mux(user_priv && enableCPT && will_commit(w),
+                          temp_num_inst + 1.U, temp_num_inst)
+    temp_num_tagc = Mux(user_priv && enableCPT && will_commit(w) && rob_uop(rob_head).uopc === uopTAGC,
+                          temp_num_tagc + 1.U, temp_num_tagc)
+    //yh+end
   } //for (w <- 0 until coreWidth)
+
+  //yh+begin
+  num_inst := Mux(initCPT, io.cpt_csrs.num_inst, temp_num_inst)
+  num_tagc := Mux(initCPT, io.cpt_csrs.num_tagc, temp_num_tagc)
+  //yh+end
 
   // **************************************************************************
   // --------------------------------------------------------------------------
@@ -567,6 +647,16 @@ class Rob(
   io.com_xcpt.bits.edge_inst := com_xcpt_uop.edge_inst
   io.com_xcpt.bits.is_rvc    := com_xcpt_uop.is_rvc
   io.com_xcpt.bits.pc_lob    := com_xcpt_uop.pc_lob
+
+  //yh+begin
+  when (io.com_xcpt.valid) {
+    printf("[%d] Found com_xcpt.valid at rob(%d) exception_thrown: %d cause: %d\n",
+            io.debug_tsc, com_xcpt_uop.rob_idx, exception_thrown, io.com_xcpt.bits.cause)
+    when (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.estr_fault.U) {
+      printf("[%d] Found estr fault at ROB\n", io.debug_tsc)
+    }
+  }
+  //yh+end
 
   val flush_commit_mask = Range(0,coreWidth).map{i => io.commit.valids(i) && io.commit.uops(i).flush_on_commit}
   val flush_commit = flush_commit_mask.reduce(_|_)

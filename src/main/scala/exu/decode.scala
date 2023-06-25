@@ -440,15 +440,41 @@ object RoCCDecode extends DecodeConstants
     CUSTOM2_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
     CUSTOM2_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
     CUSTOM2_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3            ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3_RS1        ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3_RS1_RS2    ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    CUSTOM3_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N)
+    //yh-CUSTOM3            ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    //yh-CUSTOM3_RS1        ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    //yh-CUSTOM3_RS1_RS2    ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    //yh-CUSTOM3_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    //yh-CUSTOM3_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    //yh-CUSTOM3_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N)
   )
 }
 
+//yh+begin
+/**
+ * MCU Decode constants
+ */
+object MCUDecode extends DecodeConstants
+{
+           //                                                                  frs3_en                        wakeup_delay
+           //     is val inst?                                                 |  imm sel                     |    bypassable (aka, known/fixed latency)
+           //     |  is fp inst?                                               |  |     uses_ldq              |    |  is_br
+           //     |  |  is single-prec?                        rs1 regtype     |  |     |  uses_stq           |    |  |
+           //     |  |  |  micro-code                          |       rs2 type|  |     |  |  is_amo          |    |  |
+           //     |  |  |  |         iq-type  func unit        |       |       |  |     |  |  |  is_fence     |    |  |
+           //     |  |  |  |         |        |                |       |       |  |     |  |  |  |  is_fencei |    |  |  is breakpoint or ecall?
+           //     |  |  |  |         |        |        dst     |       |       |  |     |  |  |  |  |  mem    |    |  |  |  is unique? (clear pipeline for it)
+           //     |  |  |  |         |        |        regtype |       |       |  |     |  |  |  |  |  cmd    |    |  |  |  |  flush on commit
+           //     |  |  |  |         |        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  csr cmd
+  val table: Array[(BitPat, List[BitPat])] = Array(//  |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  |
+  TAGC    -> List(Y, N, X, uopTAGC , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X,   1.U, Y, N, N, N, N, CSR.N),
+  EACT    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  EDEA    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  ECHK    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  ESTR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  ECLR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  )
+}
+//yh+end
 
 
 
@@ -466,6 +492,7 @@ class DecodeUnitIo(implicit p: Parameters) extends BoomBundle
   val csr_decode = Flipped(new freechips.rocketchip.rocket.CSRDecodeIO)
   val interrupt = Input(Bool())
   val interrupt_cause = Input(UInt(xLen.W))
+  val enableCPT = Input(Bool()) //yh+
 }
 
 /**
@@ -484,6 +511,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   if (usingFPU && usingFDivSqrt) decode_table ++= FDivSqrtDecode.table
   if (usingRoCC) decode_table ++= RoCCDecode.table
   decode_table ++= (if (xLen == 64) X64Decode.table else X32Decode.table)
+  decode_table ++= MCUDecode.table //yh+
 
   val inst = uop.inst
 
@@ -557,6 +585,34 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   when (uop.is_sfb_br) {
     uop.fu_code := FU_JMP
   }
+
+  //yh+begin
+  uop.is_edgld := false.B
+  val edg_cmd = Mux(!(cs.uses_stq && cs.mem_cmd === M_XWR && cs.rs2_type === RT_FIX), 0.U, 
+                    Mux(inst(6,0) =/= BitPat("b1111011"), 0.U,
+                    Mux(inst(14,12) === BitPat("b010"), EDG_ACT, // eact
+                    Mux(inst(14,12) === BitPat("b011"), EDG_DEA, // edea
+                    Mux(inst(14,12) === BitPat("b110"), EDG_CHK, // echk
+                    Mux(inst(14,12) === BitPat("b111"), EDG_STR, // estr
+                    Mux(inst(14,12) === BitPat("b100"), EDG_CLR, 0.U))))))) // eclr
+
+  uop.edg_cmd := edg_cmd
+  val needCC = (edg_cmd =/= 0.U)
+  uop.needCC := needCC
+  uop.uses_ssq := false.B
+
+  when (edg_cmd === EDG_CHK) {
+    printf("Found ECHK! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
+  } .elsewhen (edg_cmd === EDG_STR) {
+    printf("Found ESTR! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
+  } .elsewhen (edg_cmd === EDG_CLR) {
+    printf("Found ECLR! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
+  } .elsewhen (edg_cmd === EDG_ACT) {
+    printf("Found EACT! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
+  } .elsewhen (edg_cmd === EDG_DEA) {
+    printf("Found EDEA! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
+	}
+  //yh+end
 
 
   uop.fp_val     := cs.fp_val
