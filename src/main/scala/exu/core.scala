@@ -498,6 +498,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
 
   //-------------------------------------------------------------
   // Decoders
+  //yh+begin
+  val user_priv = Reg(Bool())
+  user_priv := (csr.io.status.prv === 0.U /* User Priv */ ||
+                csr.io.status.prv === 3.U /* Machine Priv */)
+  //yh+end
 
   for (w <- 0 until coreWidth) {
     dec_valids(w)                      := io.ifu.fetchpacket.valid && dec_fbundle.uops(w).valid &&
@@ -508,7 +513,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     decode_units(w).io.interrupt       := csr.io.interrupt
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
 		//decode_units(w).io.enableDPT       := ((csr.io.status.prv === 0.U) /* User Priv */ && custom_csrs.dpt_config(62))
-		decode_units(w).io.enableDPT			 := custom_csrs.dpt_config(62) //yh+
+		decode_units(w).io.enableDPT			 := (user_priv && custom_csrs.dpt_config(62)) //yh+
 
     dec_uops(w) := decode_units(w).io.deq.uop
   }
