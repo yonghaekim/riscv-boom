@@ -138,7 +138,7 @@ abstract class ExecutionUnit(
     val com_exception = if (hasMem || hasRocc) Input(Bool()) else null
     //yh+begin
     val lsu_cap_io = if (hasMem) Flipped(new boom.lsu.LSUCapExeIO) else null
-    val cpt_csrs = if(hasMem) Input(new CptCSRs()) else null
+    val dpt_csrs = if(hasMem) Input(new DptCSRs()) else null
     //yh+end
   })
 
@@ -383,8 +383,10 @@ class ALUExeUnit(
     val maddrcalc = Module(new MemAddrCalcUnit)
     maddrcalc.io.req        <> io.req
     //yh-maddrcalc.io.req.valid  := io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+    //yh+begin
     maddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
-                                              && io.req.bits.uop.edg_cmd === 0.U) //yh+
+                                             && io.req.bits.uop.cap_cmd === 0.U)
+    //yh+end
     maddrcalc.io.brupdate     <> io.brupdate
     maddrcalc.io.status     := io.status
     maddrcalc.io.bp         := io.bp
@@ -400,17 +402,18 @@ class ALUExeUnit(
       io.ll_fresp <> io.lsu_io.fresp
     }
 
-		//yh+begin
-		val caddrcalc = Module(new CapAddrCalcUnit)
-		caddrcalc.io.req        <> io.req
-		caddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.edg_cmd =/= 0.U)
-		caddrcalc.io.brupdate   <> io.brupdate
-		caddrcalc.io.resp.ready := DontCare
-		caddrcalc.io.cap_resp.ready := DontCare
-		caddrcalc.io.cpt_csrs := io.cpt_csrs
+    //yh+begin
+    val caddrcalc = Module(new CapAddrCalcUnit)
+    caddrcalc.io.req        <> io.req
+    caddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+                                && io.req.bits.uop.needCC)
+    caddrcalc.io.brupdate   <> io.brupdate
+    caddrcalc.io.resp.ready := DontCare
+    caddrcalc.io.cap_resp.ready := DontCare
+    caddrcalc.io.dpt_csrs := io.dpt_csrs
 
-		io.lsu_cap_io.cap_req := caddrcalc.io.cap_resp
-		//yh+end
+    io.lsu_cap_io.cap_req := caddrcalc.io.cap_resp
+    //yh+end
   }
 
   // Outputs (Write Port #0)  ---------------

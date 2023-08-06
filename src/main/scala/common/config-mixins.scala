@@ -93,6 +93,7 @@ class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
           tileParams = BoomTileParams(
             core = BoomCoreParams(
               fetchWidth = 4,
+              //fetchWidth = 16, //yh+
               decodeWidth = 1,
               numRobEntries = 32,
               issueParams = Seq(
@@ -103,8 +104,11 @@ class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               numFpPhysRegisters = 48,
               numLdqEntries = 8,
               numStqEntries = 8,
+              numSlqEntries = 8, //yh+
+              numSsqEntries = 8, //yh+
               maxBrCount = 8,
               numFetchBufferEntries = 8,
+              //numFetchBufferEntries = 24, //yh+
               ftq = FtqParameters(nEntries=16),
               nPerfCounters = 2,
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
@@ -114,6 +118,7 @@ class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
             ),
             icache = Some(
               ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, fetchBytes=2*4)
+              //ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=4, fetchBytes=8*4) //yh+
             ),
             hartId = i + idOffset
           ),
@@ -121,7 +126,8 @@ class WithNSmallBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
         )
       } ++ prev
     }
-    case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 8)
+    //yh-case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 8)
+    case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 32) //yh+
     case XLen => 64
   })
 )
@@ -150,6 +156,8 @@ class WithNMediumBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends
               numFpPhysRegisters = 64,
               numLdqEntries = 16,
               numStqEntries = 16,
+              numSlqEntries = 16, //yh+
+              numSsqEntries = 16, //yh+
               maxBrCount = 12,
               numFetchBufferEntries = 16,
               ftq = FtqParameters(nEntries=32),
@@ -186,7 +194,8 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
         BoomTileAttachParams(
           tileParams = BoomTileParams(
             core = BoomCoreParams(
-              fetchWidth = 8,
+              //yh-fetchWidth = 8,
+              fetchWidth = 4, //yh+
               decodeWidth = 3,
               numRobEntries = 96,
               issueParams = Seq(
@@ -197,17 +206,21 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               numFpPhysRegisters = 96,
               numLdqEntries = 24,
               numStqEntries = 24,
+              numSlqEntries = 24, //yh+
+              numSsqEntries = 24, //yh+
               maxBrCount = 16,
-              numFetchBufferEntries = 24,
+              //yh-numFetchBufferEntries = 24,
+              numFetchBufferEntries = 9, //yh+
               ftq = FtqParameters(nEntries=32),
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              //yh-DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
-							DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=16, nMSHRs=4, nTLBWays=16) //yh+
+              DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
+							//DCacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=16, nMSHRs=4, nTLBWays=16) //yh+
             ),
             icache = Some(
-              ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, fetchBytes=4*4)
+              //yh-ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, fetchBytes=4*4)
+              ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=64, nWays=8, fetchBytes=2*4) //yh+
             ),
             hartId = i + idOffset
           ),
@@ -215,7 +228,8 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
         )
       } ++ prev
     }
-    case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 16)
+    //yh-case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 16)
+    case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 32) //yh+
     case XLen => 64
   })
 )
@@ -426,6 +440,7 @@ class WithTAGELBPD extends Config((site, here, up) => {
   case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
     case tp: BoomTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(core = tp.tileParams.core.copy(
       bpdMaxMetaLength = 120,
+      //bpdMaxMetaLength = 240, //yh+
       globalHistoryLength = 64,
       localHistoryLength = 1,
       localHistoryNSets = 0,

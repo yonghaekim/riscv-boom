@@ -117,14 +117,18 @@ class FuncUnitResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundl
 class FuncUnitCapResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundle
   with HasBoomUOP
 {
+	val tagged = Bool()
+	val dir = Bool()
 	val tag = UInt(tagWidth.W)
   val caddr = UInt((vaddrBits+1).W) // only for caddr -> LSU
-	val data = UInt(dataWidth.W)
+  val taddr = UInt(32.W) // only for caddr -> LSU
+  val data = UInt(dataWidth.W)
+  val rs1_data = UInt(dataWidth.W)
 }
 
-class CptCSRs(implicit p: Parameters) extends BoomBundle
+class DptCSRs(implicit p: Parameters) extends BoomBundle
 {
-	val emt_base = UInt((vaddrBits+1).W)
+	val hbt_base = UInt((vaddrBits+1).W)
 	val num_ways = UInt(wayAddrSz.W)
 }
 //yh+end
@@ -206,7 +210,7 @@ abstract class FunctionalUnit(
 
 		//yh+begin
 		// only used by capaddr calc unit
-		val cpt_csrs = if (isCapAddrCalcUnit) Input(new CptCSRs()) else null
+		val dpt_csrs = if (isCapAddrCalcUnit) Input(new DptCSRs()) else null
     val cap_resp = if (isCapAddrCalcUnit) (new DecoupledIO(new FuncUnitCapResp(dataWidth))) else null
 		//yh+end
   })
@@ -344,6 +348,7 @@ class ALUUnit(isJmpUnit: Boolean = false, numStages: Int = 1, dataWidth: Int)(im
   val alu = Module(new freechips.rocketchip.rocket.ALU())
 
 	alu.io.valid := io.req.valid //yh+
+	alu.io.is_sp := (io.req.bits.uop.lrs2 === SP) //yh+
   alu.io.in1 := op1_data.asUInt
   alu.io.in2 := op2_data.asUInt
   alu.io.fn  := uop.ctrl.op_fcn
@@ -434,11 +439,7 @@ class ALUUnit(isJmpUnit: Boolean = false, numStages: Int = 1, dataWidth: Int)(im
     val jalr_target_base = io.req.bits.rs1_data.asSInt
     val jalr_target_xlen = Wire(UInt(xLen.W))
     jalr_target_xlen := (jalr_target_base + target_offset).asUInt
-    //yh-val jalr_target = (encodeVirtualAddress(jalr_target_xlen, jalr_target_xlen).asSInt & -2.S).asUInt
-    //yh+begin
-    val jalr_target_masked = Mux(jalr_target_xlen(xLen-tagWidth-1,vaddrBits) =/= 0.U, jalr_target_xlen, jalr_target_xlen(xLen-tagWidth-1,0))
-    val jalr_target = (encodeVirtualAddress(jalr_target_masked, jalr_target_masked).asSInt & -2.S).asUInt
-    //yh+end
+    val jalr_target = (encodeVirtualAddress(jalr_target_xlen, jalr_target_xlen).asSInt & -2.S).asUInt
 
     brinfo.jalr_target := jalr_target
     val cfi_idx = ((uop.pc_lob ^ Mux(io.get_ftq_pc.entry.start_bank === 1.U, 1.U << log2Ceil(bankBytes), 0.U)))(log2Ceil(fetchWidth),1)
@@ -513,8 +514,13 @@ class MemAddrCalcUnit(implicit p: Parameters)
 {
   // perform address calculation
   val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
-  val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
-                                       sum(63,vaddrBits) =/= 0.U)
+  //yh-val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
+  //yh-                                     sum(63,vaddrBits) =/= 0.U)
+  //yh+begin
+	assert (!(io.req.valid && io.req.bits.uop.cap_cmd =/= CAP_MEM))
+  val ea_sign = Mux(sum(vaddrBits-1), ~sum(xLen-tagWidth-1,vaddrBits) === 0.U,
+                                       sum(xLen-tagWidth-1,vaddrBits) =/= 0.U)
+	//yh+end
   val effective_address = Cat(ea_sign, sum(vaddrBits-1,0)).asUInt
 
   val store_data = io.req.bits.rs2_data
@@ -591,40 +597,42 @@ class CapAddrCalcUnit(implicit p: Parameters)
   with freechips.rocketchip.rocket.constants.ScalarOpConstants
 {
   // perform address calculation
+  val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
+
 	val tag = io.req.bits.rs1_data(xLen-1,xLen-tagWidth)
-  val caddr = (io.cpt_csrs.emt_base + ((tag * io.cpt_csrs.num_ways) << 3))
-  val activated = (io.req.bits.uop.edg_cmd === EDG_ACT)
-  //TODO val data = Cat(activated, io.req.bits.uop.imm_packed(19,8), io.req.bits.rs1_data(47,0))
-  val data = Cat(io.req.bits.uop.imm_packed(19,8), io.req.bits.rs1_data(47,0))
+	val tagged = (io.req.bits.rs1_data(xLen-tagWidth-1,vaddrBits+1) === 0.U && (tag =/= 0.U))
+	val is_cstr = io.req.bits.uop.cap_cmd === CAP_STR
+	val is_cclr = io.req.bits.uop.cap_cmd === CAP_CLR
+	val is_csrch = io.req.bits.uop.cap_cmd === CAP_SRC
+  //val caddr = (io.dpt_csrs.hbt_base + (tag << io.dpt_csrs.tag_offset))
+  val caddr = (io.dpt_csrs.hbt_base + ((tag * io.dpt_csrs.num_ways) << 3))
   assert((xLen-tagWidth-1) > vaddrBits/2)
 
   io.cap_resp.valid := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
   io.cap_resp.bits.uop := io.req.bits.uop
   io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
 	io.cap_resp.bits.tag := tag
+	io.cap_resp.bits.tagged := tagged
+	io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
   io.cap_resp.bits.caddr := caddr
-	io.cap_resp.bits.data := data
+	io.cap_resp.bits.taddr := Mux(io.req.bits.uop.cap_cmd =/= CAP_MEM, io.req.bits.rs1_data(31,0), sum(31,0))
+  io.cap_resp.bits.data := io.req.bits.rs2_data
+  io.cap_resp.bits.rs1_data := io.req.bits.rs1_data
 
   when (io.req.valid) {
-		printf("ssq(%d) ", io.req.bits.uop.ssq_idx)
-
-    when (io.req.bits.uop.edg_cmd === EDG_CHK) {
-      printf("Found ECHK ")
-    } .elsewhen (io.req.bits.uop.edg_cmd === EDG_STR) {
-      printf("Found ESTR ")
-    } .elsewhen (io.req.bits.uop.edg_cmd === EDG_CLR) {
-      printf("Found ECLR ")
-    } .elsewhen (io.req.bits.uop.edg_cmd === EDG_ACT) {
-      printf("Found EACT ")
-    } .elsewhen (io.req.bits.uop.edg_cmd === EDG_DEA) {
-      printf("Found EDEA ")
-    } .otherwise {
-			assert(false.B)
-		}
-
-    printf("tag: %x data: %x rs1: %x rs2: %x imm: %x base: %x # ways: %x caddr: %x\n",
-            tag, data, io.req.bits.rs1_data, io.req.bits.rs2_data, io.req.bits.uop.imm_packed(19,8),
-						io.cpt_csrs.emt_base, io.cpt_csrs.num_ways, caddr)
+    when (is_cstr) {
+      printf("Found CSTR base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+              io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    } .elsewhen (is_cclr) {
+      printf("Found CCLR base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+              io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    } .elsewhen (is_csrch) {
+      printf("Found CSRC base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+							io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    }
   }
 }
 //yh+end

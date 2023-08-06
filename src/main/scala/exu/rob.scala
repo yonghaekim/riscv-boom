@@ -36,12 +36,12 @@ import boom.common._
 import boom.util._
 
 //yh+begin
-class ROBCPTCSRs(implicit p: Parameters) extends BoomBundle()(p)
+class RobDptCSRs(implicit p: Parameters) extends BoomBundle()(p)
 {
-  val enableCPT           = Bool()
-  val user_priv           = Bool()
+  val enableStats         = Bool()
+  val num_tagd            = UInt(xLen.W)
+  val num_xtag            = UInt(xLen.W)
   val num_inst            = UInt(xLen.W)
-  val num_tagc            = UInt(xLen.W)
 }
 //yh+end
 
@@ -83,10 +83,11 @@ class RobIo(
   val lsu_clr_bsy      = Input(Vec(memWidth + 1, Valid(UInt(robAddrSz.W))))
 
   //yh+begin
-  val lsu_clr_needCC   = Input(Vec(memWidth+memWidth, Valid(UInt(robAddrSz.W))))
-  val cpt_csrs         = Input(new ROBCPTCSRs)
+  val lsu_clr_needCC   = Input(Vec(memWidth + memWidth, Valid(UInt(robAddrSz.W))))
+  val dpt_csrs         = Input(new RobDptCSRs)
+  val num_tagd         = Output(UInt(xLen.W))
+  val num_xtag         = Output(UInt(xLen.W))
   val num_inst         = Output(UInt(xLen.W))
-  val num_tagc         = Output(UInt(xLen.W))
   //yh+end
 
   // Port for unmarking loads/stores as speculation hazards..
@@ -278,20 +279,21 @@ class Rob(
   io.flush_frontend := r_xcpt_val
 
   //yh+begin
-  val enableCPT        		= RegInit(false.B)
-  val user_priv       		= RegInit(false.B)
-  val initCPT           	= Reg(Bool())
+  val enableStats        		= RegInit(false.B)
+  val initDPT           	= Reg(Bool())
+  val num_tagd            = Reg(UInt(xLen.W))
+  val num_xtag            = Reg(UInt(xLen.W))
   val num_inst            = Reg(UInt(xLen.W))
-  val num_tagc            = Reg(UInt(xLen.W))
 
-  enableCPT              	:= io.cpt_csrs.enableCPT
-  user_priv           		:= io.cpt_csrs.user_priv
-  initCPT                	:= io.cpt_csrs.enableCPT & !enableCPT
+  enableStats              	:= io.dpt_csrs.enableStats
+  initDPT                	:= io.dpt_csrs.enableStats & !enableStats
+  io.num_tagd             := num_tagd
+  io.num_xtag             := num_xtag
   io.num_inst             := num_inst
-  io.num_tagc             := num_tagc
 
+  var temp_num_tagd = num_tagd
+  var temp_num_xtag = num_xtag
   var temp_num_inst = num_inst
-  var temp_num_tagc = num_tagc
   //yh+end
 
   //--------------------------------------------------
@@ -359,16 +361,24 @@ class Rob(
       rob_val(rob_tail)       := true.B
       //yh-rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence ||
       //yh-                             io.enq_uops(w).is_fencei)
-      //yh+begin
-      rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence ||
+			//yh+begin
+      rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence 	||
                                    io.enq_uops(w).is_fencei ||
-                                   io.enq_uops(w).edg_cmd =/= 0.U)
-      //yh+end
+                                   io.enq_uops(w).cap_cmd === CAP_STR ||
+                                   io.enq_uops(w).cap_cmd === CAP_CLR)
       //yh-rob_unsafe(rob_tail)    := io.enq_uops(w).unsafe
-      //yh+begin
       rob_unsafe(rob_tail)    := (io.enq_uops(w).unsafe &&
-                                  io.enq_uops(w).edg_cmd === 0.U)
-      //yh+end
+                                   !(io.enq_uops(w).cap_cmd === CAP_STR ||
+                                      io.enq_uops(w).cap_cmd === CAP_CLR))
+			when (io.enq_uops(w).is_fence	||
+							io.enq_uops(w).is_fencei || 
+              io.enq_uops(w).cap_cmd === CAP_STR ||
+              io.enq_uops(w).cap_cmd === CAP_CLR) {
+				printf("rob_bsy(%d) is false cstr: %d cclr: %d csrch: %d\n",
+                rob_tail, io.enq_uops(w).cap_cmd === CAP_STR,
+                io.enq_uops(w).cap_cmd === CAP_CLR, io.enq_uops(w).cap_cmd === CAP_SRC)
+			}
+			//yh+end
       rob_needCC(rob_tail)    := io.enq_uops(w).needCC //yh+
       rob_uop(rob_tail)       := io.enq_uops(w)
       rob_exception(rob_tail) := io.enq_uops(w).exception
@@ -404,6 +414,7 @@ class Rob(
     // Stores have a separate method to clear busy bits
     for (clr_rob_idx <- io.lsu_clr_bsy) {
       when (clr_rob_idx.valid && MatchBank(GetBankIdx(clr_rob_idx.bits))) {
+        printf("Clear busy rob(%d)\n", clr_rob_idx.bits) //yh+
         val cidx = GetRowIdx(clr_rob_idx.bits)
         rob_bsy(cidx)    := false.B
         rob_unsafe(cidx) := false.B
@@ -413,6 +424,7 @@ class Rob(
     }
     for (clr <- io.lsu_clr_unsafe) {
       when (clr.valid && MatchBank(GetBankIdx(clr.bits))) {
+        printf("Clear unsafe rob(%d)\n", clr.bits) //yh+
         val cidx = GetRowIdx(clr.bits)
         rob_unsafe(cidx) := false.B
       }
@@ -427,7 +439,6 @@ class Rob(
       }
     }
     //yh+end
-
 
     //-----------------------------------------------
     // Accruing fflags
@@ -444,8 +455,9 @@ class Rob(
 
     when (io.lxcpt.valid && MatchBank(GetBankIdx(io.lxcpt.bits.uop.rob_idx))) {
       rob_exception(GetRowIdx(io.lxcpt.bits.uop.rob_idx)) := true.B
+      //rob_needCC(GetRowIdx(io.lxcpt.bits.uop.rob_idx)) := false.B //yh+
       //yh-when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING) {
-      when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING && io.lxcpt.bits.uop.edg_cmd =/= EDG_STR) { //yh+
+      when (io.lxcpt.bits.cause =/= MINI_EXCEPTION_MEM_ORDERING && io.lxcpt.bits.uop.cap_cmd =/= CAP_STR) {
         // In the case of a mem-ordering failure, the failing load will have been marked safe already.
         assert(rob_unsafe(GetRowIdx(io.lxcpt.bits.uop.rob_idx)),
           "An instruction marked as safe is causing an exception")
@@ -459,14 +471,6 @@ class Rob(
     // Can this instruction commit? (the check for exceptions/rob_state happens later).
     //yh-can_commit(w) := rob_val(rob_head) && !(rob_bsy(rob_head)) && !io.csr_stall
     can_commit(w) := (rob_val(rob_head) && !rob_bsy(rob_head) && !io.csr_stall && !rob_needCC(rob_head)) //yh+
-
-    //yh+begin
-    //when (rob_val(rob_head) && !rob_bsy(rob_head) && !io.csr_stall) {
-    //  when (rob_needCC(rob_head)) {
-    //    printf("Couldn't commit because of needCC rob(%d)\n", rob_head)
-    //  }
-    //}
-    //yh+end
 
 
     // use the same "com_uop" for both rollback AND commit
@@ -554,11 +558,11 @@ class Rob(
     //------------------------------------------------
     // Invalid entries are safe; thrown exceptions are unsafe.
     for (i <- 0 until numRobRows) {
-      //yh-rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i))
+      //rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i))
       rob_unsafe_masked((i << log2Ceil(coreWidth)) + w) := rob_val(i) && (rob_unsafe(i) || rob_exception(i) || rob_needCC(i)) //yh+
     }
     // Read unsafe status of PNR row.
-    //yh-rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr))
+    //rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr))
     rob_pnr_unsafe(w) := rob_val(rob_pnr) && (rob_unsafe(rob_pnr) || rob_exception(rob_pnr) || rob_needCC(rob_pnr)) //yh+
 
     // -----------------------------------------------
@@ -593,17 +597,32 @@ class Rob(
     io.commit.debug_wdata(w) := rob_debug_wdata(rob_head)
 
     //yh+begin
-    temp_num_inst = Mux(user_priv && enableCPT && will_commit(w),
+    temp_num_tagd = Mux(enableStats && will_commit(w) && rob_uop(rob_head).uopc === uopTAGD,
+                          temp_num_tagd + 1.U, temp_num_tagd)
+    temp_num_xtag = Mux(enableStats && will_commit(w) && rob_uop(rob_head).uopc === uopXTAG,
+                          temp_num_xtag + 1.U, temp_num_xtag)
+    temp_num_inst = Mux(enableStats && will_commit(w),
                           temp_num_inst + 1.U, temp_num_inst)
-    temp_num_tagc = Mux(user_priv && enableCPT && will_commit(w) && rob_uop(rob_head).uopc === uopTAGC,
-                          temp_num_tagc + 1.U, temp_num_tagc)
+    //when (will_commit(w)) {
+    //  printf("Commit INST at ROB! enableStats: %d\n", enableStats)
+
+    //  when (rob_uop(rob_head).uopc === uopTAGD) {
+    //    printf("Commit TAGD at ROB!\n")
+    //  }
+    //  when (rob_uop(rob_head).uopc === uopXTAG) {
+    //    printf("Commit XTAG at ROB!\n")
+    //  }
+    //  
+    //}
     //yh+end
   } //for (w <- 0 until coreWidth)
 
   //yh+begin
-  num_inst := Mux(initCPT, io.cpt_csrs.num_inst, temp_num_inst)
-  num_tagc := Mux(initCPT, io.cpt_csrs.num_tagc, temp_num_tagc)
+  num_tagd := Mux(initDPT, io.dpt_csrs.num_tagd, temp_num_tagd)
+  num_xtag := Mux(initDPT, io.dpt_csrs.num_xtag, temp_num_xtag)
+  num_inst := Mux(initDPT, io.dpt_csrs.num_inst, temp_num_inst)
   //yh+end
+
 
   // **************************************************************************
   // --------------------------------------------------------------------------
@@ -650,13 +669,14 @@ class Rob(
 
   //yh+begin
   when (io.com_xcpt.valid) {
-    printf("[%d] Found com_xcpt.valid at rob(%d) exception_thrown: %d cause: %d\n",
-            io.debug_tsc, com_xcpt_uop.rob_idx, exception_thrown, io.com_xcpt.bits.cause)
-    when (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.estr_fault.U) {
-      printf("[%d] Found estr fault at ROB\n", io.debug_tsc)
+    printf("[%d] Found com_xcpt.valid at ROB exception_thrown: %d rob(%d)\n",
+            io.debug_tsc, exception_thrown, com_xcpt_uop.rob_idx)
+    when (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.cstr_fault.U) {
+      printf("[%d] Found cstr fault at ROB\n", io.debug_tsc)
     }
   }
   //yh+end
+
 
   val flush_commit_mask = Range(0,coreWidth).map{i => io.commit.valids(i) && io.commit.uops(i).flush_on_commit}
   val flush_commit = flush_commit_mask.reduce(_|_)
@@ -824,6 +844,10 @@ class Rob(
     }
 
     pnr_maybe_at_tail := !rob_deq && (do_inc_row || pnr_maybe_at_tail)
+  }
+
+  when (IsOlder(rob_pnr_idx, rob_head_idx, rob_tail_idx) && rob_pnr_idx =/= rob_tail_idx) {
+    printf("rob_pnr_idx: %d rob_head_idx: %d rob_tail_idx: %d\n", rob_pnr_idx, rob_head_idx, rob_tail_idx)
   }
 
   // Head overrunning PNR likely means an entry hasn't been marked as safe when it should have been.

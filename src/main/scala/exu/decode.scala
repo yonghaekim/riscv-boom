@@ -10,8 +10,6 @@ import chisel3.util._
 
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.rocket.Instructions._
-import freechips.rocketchip.rocket.Instructions32
-import freechips.rocketchip.rocket.CustomInstructions._
 import freechips.rocketchip.rocket.RVCExpander
 import freechips.rocketchip.rocket.{CSR,Causes}
 import freechips.rocketchip.util.{uintToBitPat,UIntIsOneOf}
@@ -109,12 +107,9 @@ object X32Decode extends DecodeConstants
             //     |  |  |  |         |        |        regtype |       |       |  |     |  |  |  |  |  cmd    |    |  |  |  |  flush on commit
             //     |  |  |  |         |        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  csr cmd
   val table: Array[(BitPat, List[BitPat])] = Array(//   |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  |
-  Instructions32.SLLI ->
-              List(Y, N, X, uopSLLI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N),
-  Instructions32.SRLI ->
-              List(Y, N, X, uopSRLI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N),
-  Instructions32.SRAI ->
-              List(Y, N, X, uopSRAI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N)
+  SLLI_RV32-> List(Y, N, X, uopSLLI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N),
+  SRLI_RV32-> List(Y, N, X, uopSRLI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N),
+  SRAI_RV32-> List(Y, N, X, uopSRAI , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 1.U, Y, N, N, N, N, CSR.N)
   )
 }
 
@@ -236,8 +231,8 @@ object XDecode extends DecodeConstants
   CSRRCI  -> List(Y, N, X, uopCSRRCI,IQT_INT, FU_CSR , RT_FIX, RT_PAS, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, Y, Y, CSR.C),
 
   SFENCE_VMA->List(Y,N, X, uopSFENCE,IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N,M_SFENCE,0.U,N, N, N, Y, Y, CSR.N),
-  ECALL   -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, Y, Y, Y, CSR.I),
-  EBREAK  -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, Y, Y, Y, CSR.I),
+  SCALL   -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, Y, Y, Y, CSR.I),
+  SBREAK  -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, Y, Y, Y, CSR.I),
   SRET    -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, Y, Y, CSR.I),
   MRET    -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, Y, Y, CSR.I),
   DRET    -> List(Y, N, X, uopERET  ,IQT_INT, FU_CSR , RT_X  , RT_X  , RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, Y, Y, CSR.I),
@@ -310,9 +305,9 @@ object FDecode extends DecodeConstants
   FCLASS_S-> List(Y, Y, Y, uopFCLASS_S,IQT_FP , FU_F2I, RT_FIX, RT_FLT, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
   FCLASS_D-> List(Y, Y, N, uopFCLASS_D,IQT_FP , FU_F2I, RT_FIX, RT_FLT, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
 
-  FMV_W_X -> List(Y, Y, Y, uopFMV_W_X, IQT_INT, FU_I2F, RT_FLT, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+  FMV_S_X -> List(Y, Y, Y, uopFMV_S_X, IQT_INT, FU_I2F, RT_FLT, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
   FMV_D_X -> List(Y, Y, N, uopFMV_D_X, IQT_INT, FU_I2F, RT_FLT, RT_FIX, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-  FMV_X_W -> List(Y, Y, Y, uopFMV_X_W, IQT_FP , FU_F2I, RT_FIX, RT_FLT, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+  FMV_X_S -> List(Y, Y, Y, uopFMV_X_S, IQT_FP , FU_F2I, RT_FIX, RT_FLT, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
   FMV_X_D -> List(Y, Y, N, uopFMV_X_D, IQT_FP , FU_F2I, RT_FIX, RT_FLT, RT_X  , N, IS_I, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
 
   FSGNJ_S -> List(Y, Y, Y, uopFSGNJ_S, IQT_FP , FU_FPU, RT_FLT, RT_FLT, RT_FLT, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
@@ -440,12 +435,12 @@ object RoCCDecode extends DecodeConstants
     CUSTOM2_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
     CUSTOM2_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
     CUSTOM2_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3            ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3_RS1        ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3_RS1_RS2    ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
-    //yh-CUSTOM3_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N)
+    CUSTOM3            ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    CUSTOM3_RS1        ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    CUSTOM3_RS1_RS2    ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_X  , RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    CUSTOM3_RD         ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_X  , RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    CUSTOM3_RD_RS1     ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_X  , N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N),
+    CUSTOM3_RD_RS1_RS2 ->List(Y, N, X, uopROCC   , IQT_INT, FU_CSR, RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X  , 0.U, N, N, N, N, N, CSR.N)
   )
 }
 
@@ -466,18 +461,14 @@ object MCUDecode extends DecodeConstants
            //     |  |  |  |         |        |        regtype |       |       |  |     |  |  |  |  |  cmd    |    |  |  |  |  flush on commit
            //     |  |  |  |         |        |        |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  csr cmd
   val table: Array[(BitPat, List[BitPat])] = Array(//  |       |       |       |  |     |  |  |  |  |  |      |    |  |  |  |  |  |
-  TAGC    -> List(Y, N, X, uopTAGC , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X,   1.U, Y, N, N, N, N, CSR.N),
-  EACT    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
-  EDEA    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
-  ECHK    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
-  ESTR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
-  ECLR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  TAGD    -> List(Y, N, X, uopTAGD , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, N, N, N, N, M_X,   1.U, Y, N, N, N, N, CSR.N),
+  XTAG    -> List(Y, N, X, uopXTAG , IQT_INT, FU_ALU , RT_FIX, RT_FIX, RT_X,   N, IS_X, N, N, N, N, N, M_X,   1.U, Y, N, N, N, N, CSR.N),
+  CSTR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  CCLR    -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_X  , RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 0.U, N, N, N, N, N, CSR.N),
+  CSRCH   -> List(Y, N, X, uopSTA  , IQT_MEM, FU_MEM , RT_FIX, RT_FIX, RT_FIX, N, IS_S, N, Y, N, N, N, M_XWR, 3.U, N, N, N, N, N, CSR.N),
   )
 }
 //yh+end
-
-
-
 
 /**
  * IO bundle for the Decode unit
@@ -492,7 +483,7 @@ class DecodeUnitIo(implicit p: Parameters) extends BoomBundle
   val csr_decode = Flipped(new freechips.rocketchip.rocket.CSRDecodeIO)
   val interrupt = Input(Bool())
   val interrupt_cause = Input(UInt(xLen.W))
-  val enableCPT = Input(Bool()) //yh+
+  val enableDPT = Input(Bool()) //yh+
 }
 
 /**
@@ -587,33 +578,29 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   }
 
   //yh+begin
-  uop.is_edgld := false.B
-  val edg_cmd = Mux(!(cs.uses_stq && cs.mem_cmd === M_XWR && cs.rs2_type === RT_FIX), 0.U, 
-                    Mux(inst(6,0) =/= BitPat("b1111011"), 0.U,
-                    Mux(inst(14,12) === BitPat("b010"), EDG_ACT, // eact
-                    Mux(inst(14,12) === BitPat("b011"), EDG_DEA, // edea
-                    Mux(inst(14,12) === BitPat("b110"), EDG_CHK, // echk
-                    Mux(inst(14,12) === BitPat("b111"), EDG_STR, // estr
-                    Mux(inst(14,12) === BitPat("b100"), EDG_CLR, 0.U))))))) // eclr
-
-  uop.edg_cmd := edg_cmd
-  val needCC = (edg_cmd =/= 0.U)
-  uop.needCC := needCC
+  uop.is_capld := false.B
+  uop.cap_cmd := Mux(inst(6,0) =/= BitPat("b1110111"), 0.U,
+                    Mux(inst(14,12) === BitPat("b011"), 1.U, // cstr
+                    Mux(inst(14,12) === BitPat("b101"), 2.U, // cclr
+                    Mux(inst(14,12) === BitPat("b000"), 3.U, 0.U)))) // cclr
+  uop.needCC 		 := (io.enableDPT && (cs.fu_code === FU_MEM) && !cs.is_amo && !cs.is_fence &&
+										((cs.uses_ldq && cs.mem_cmd === M_XRD && cs.dst_type === RT_FIX) ||
+											(cs.uses_stq && cs.mem_cmd === M_XWR && cs.rs2_type === RT_FIX)))
+  uop.uses_slq := false.B
   uop.uses_ssq := false.B
 
-  when (edg_cmd === EDG_CHK) {
-    printf("Found ECHK! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
-  } .elsewhen (edg_cmd === EDG_STR) {
-    printf("Found ESTR! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
-  } .elsewhen (edg_cmd === EDG_CLR) {
-    printf("Found ECLR! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
-  } .elsewhen (edg_cmd === EDG_ACT) {
-    printf("Found EACT! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
-  } .elsewhen (edg_cmd === EDG_DEA) {
-    printf("Found EDEA! enableCPT: %d needCC: %d\n", io.enableCPT, needCC)
-	}
+  //when (cs.uopc === uopTAGD) {
+  //  printf("Found uopTAGD!\n")
+  //} .elsewhen (cs.uopc === uopXTAG) {
+  //  printf("Found uopXTAG!\n")
+  //} .elsewhen (uop.is_cstr) {
+  //  printf("Found CSTR!\n")
+	//} .elsewhen (uop.is_cclr) {
+  //  printf("Found CCLR!\n")
+  //} .elsewhen (uop.is_csrch) {
+  //  printf("Found CSRCH!\n")
+  //}
   //yh+end
-
 
   uop.fp_val     := cs.fp_val
   uop.fp_single  := cs.fp_single // TODO use this signal instead of the FPU decode's table signal?
@@ -741,11 +728,7 @@ class BranchDecode(implicit p: Parameters) extends BoomModule
                SRL         -> List(N, N, N, Y, Y)
             ))
 
-  val cs_is_br = bpd_csignals(0)(0)
-  val cs_is_jal = bpd_csignals(1)(0)
-  val cs_is_jalr = bpd_csignals(2)(0)
-  val cs_is_shadowable = bpd_csignals(3)(0)
-  val cs_has_rs2 = bpd_csignals(4)(0)
+  val (cs_is_br: Bool) :: (cs_is_jal: Bool) :: (cs_is_jalr:Bool) :: (cs_is_shadowable:Bool) :: (cs_has_rs2) :: Nil = bpd_csignals
 
   io.out.is_call := (cs_is_jal || cs_is_jalr) && GetRd(io.inst) === RA
   io.out.is_ret  := cs_is_jalr && GetRs1(io.inst) === BitPat("b00?01") && GetRd(io.inst) === X0

@@ -34,8 +34,10 @@ case class BoomCoreParams(
   numLdqEntries: Int = 16,
   numStqEntries: Int = 16,
   //yh+begin
+  numSlqEntries: Int = 16,
+  numSsqEntries: Int = 16,
   tagWidth:      Int = 16,
-  wayAddrSz:     Int = 11, // up to 1024 ways are supported
+  wayAddrSz:     Int = 8, // up to 511 ways are supported
   //yh+end
   numIntPhysRegisters: Int = 96,
   numFpPhysRegisters: Int = 64,
@@ -143,60 +145,65 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
   def disableOOO = getOrElse(chickenCSR, _.value(3), true.B)
 
   //yh+begin
-  override def cptConfigCSR = {
+	// 63: enableDPT
+	// 62: enableStats
+	// 61-60: reserved
+	// 59-48: num_ways
+	// 47-0: base_addr
+  override def dptConfigCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(cptConfigCSRId, mask, Some(init)))
+    Some(CustomCSR(dptConfigCSRId, mask, Some(init)))
   }
 
-  override def numInstCSR = {
+  //override def boundsMarginCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(boundsMarginCSRId, mask, Some(init)))
+  //}
+
+  override def numTagdCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numInstCSRId, mask, Some(init)))
+    Some(CustomCSR(numTagdCSRId, mask, Some(init)))
   }
 
-  override def numTagcCSR = {
+  override def numXtagCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numTagcCSRId, mask, Some(init)))
+    Some(CustomCSR(numXtagCSRId, mask, Some(init)))
   }
 
-  override def numEchkCSR = {
+  override def numTaggedStoreCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numEchkCSRId, mask, Some(init)))
+    Some(CustomCSR(numTaggedStoreCSRId, mask, Some(init)))
   }
 
-  override def numEstrCSR = {
+  override def numUntaggedStoreCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numEstrCSRId, mask, Some(init)))
+    Some(CustomCSR(numUntaggedStoreCSRId, mask, Some(init)))
   }
 
-  override def numEclrCSR = {
+  override def numTaggedLoadCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numEclrCSRId, mask, Some(init)))
+    Some(CustomCSR(numTaggedLoadCSRId, mask, Some(init)))
   }
 
-  override def numEactCSR = {
+  override def numUntaggedLoadCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numEactCSRId, mask, Some(init)))
-  }
-
-  override def numEdeaCSR = {
-    val params = tileParams.core.asInstanceOf[BoomCoreParams]
-    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
-    val init = BigInt(0x0)
-    Some(CustomCSR(numEdeaCSRId, mask, Some(init)))
+    Some(CustomCSR(numUntaggedLoadCSRId, mask, Some(init)))
   }
 
   override def ldstTrafficCSR = {
@@ -206,19 +213,103 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
     Some(CustomCSR(ldstTrafficCSRId, mask, Some(init)))
   }
 
-  override def edgeTrafficCSR = {
+  override def boundsTrafficCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(edgeTrafficCSRId, mask, Some(init)))
+    Some(CustomCSR(boundsTrafficCSRId, mask, Some(init)))
   }
 
-  override def numEcacheHitCSR = {
+  override def numInstCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
     val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
     val init = BigInt(0x0)
-    Some(CustomCSR(numEcacheHitCSRId, mask, Some(init)))
+    Some(CustomCSR(numInstCSRId, mask, Some(init)))
   }
+
+  override def numStoreHitCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numStoreHitCSRId, mask, Some(init)))
+  }
+
+  override def numLoadHitCSR = {
+    val params = tileParams.core.asInstanceOf[BoomCoreParams]
+    val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+    val init = BigInt(0x0)
+    Some(CustomCSR(numLoadHitCSRId, mask, Some(init)))
+  }
+
+  //override def numCstrCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCstrCSRId, mask, Some(init)))
+  //}
+
+  //override def numCclrCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCclrCSRId, mask, Some(init)))
+  //}
+
+  //override def numCsrchCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCsrchCSRId, mask, Some(init)))
+  //}
+
+  //override def numCsrchHitCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCsrchHitCSRId, mask, Some(init)))
+  //}
+
+  //override def numCstrItrCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCstrItrCSRId, mask, Some(init)))
+  //}
+
+  //override def numCclrItrCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCclrItrCSRId, mask, Some(init)))
+  //}
+
+  //override def numCsrchItrCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCsrchItrCSRId, mask, Some(init)))
+  //}
+
+  //override def numChkFailCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numChkFailCSRId, mask, Some(init)))
+  //}
+
+  //override def numCstrFailCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCstrFailCSRId, mask, Some(init)))
+  //}
+
+  //override def numCclrFailCSR = {
+  //  val params = tileParams.core.asInstanceOf[BoomCoreParams]
+  //  val mask = BigInt(0x7FFFFFFFFFFFFFFFL)
+  //  val init = BigInt(0x0)
+  //  Some(CustomCSR(numCclrFailCSRId, mask, Some(init)))
+  //}
 	//yh+end
 }
 
@@ -249,7 +340,8 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val numLdqEntries = boomParams.numLdqEntries       // number of LAQ entries
   val numStqEntries = boomParams.numStqEntries       // number of SAQ/SDQ entries
   //yh+begin
-  val numSsqEntries = boomParams.numStqEntries       // number of SSQ entries
+  val numSlqEntries = boomParams.numSlqEntries       // number of SLQ entries
+  val numSsqEntries = boomParams.numSsqEntries       // number of SSQ entries
   val tagWidth      = boomParams.tagWidth            // Tag Width
   val wayAddrSz     = boomParams.wayAddrSz           // Way address size
   //yh+end
@@ -350,11 +442,13 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val maxPregSz       = ipregSz max fpregSz
   val ldqAddrSz       = log2Ceil(numLdqEntries)
   val stqAddrSz       = log2Ceil(numStqEntries)
-  val lsuAddrSz       = ldqAddrSz max stqAddrSz
   //yh+begin
-  val ssqAddrSz       = log2Ceil(numStqEntries)
+  val slqAddrSz       = log2Ceil(numSlqEntries)
+  val ssqAddrSz       = log2Ceil(numSsqEntries)
+  require ((numSlqEntries-1) > coreWidth)
   require ((numSsqEntries-1) > coreWidth)
   //yh+end
+  val lsuAddrSz       = ldqAddrSz max stqAddrSz
   val brTagSz         = log2Ceil(maxBrCount)
 
   require (numIntPhysRegs >= (32 + coreWidth))

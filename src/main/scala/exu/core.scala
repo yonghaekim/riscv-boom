@@ -238,6 +238,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     mem_units(i).io.lsu_io <> io.lsu.exe(i)
   }
 
+
   //-------------------------------------------------------------
   // Uarch Hardware Performance Events (HPEs)
 
@@ -497,11 +498,6 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
 
   //-------------------------------------------------------------
   // Decoders
-	//yh+begin
-	val user_priv = Reg(Bool())
-	user_priv := (csr.io.status.prv === 0.U /* User Priv */ ||
-								csr.io.status.prv === 3.U /* Machine Priv */)
-	//yh+end
 
   for (w <- 0 until coreWidth) {
     dec_valids(w)                      := io.ifu.fetchpacket.valid && dec_fbundle.uops(w).valid &&
@@ -511,11 +507,9 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     decode_units(w).io.csr_decode      <> csr.io.decode(w)
     decode_units(w).io.interrupt       := csr.io.interrupt
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
-    //yh+begin
-		//decode_units(w).io.enableCPT       := ((csr.io.status.prv === 0.U) /* User Priv */ && custom_csrs.cpt_config(62))
-		decode_units(w).io.enableCPT			 := (user_priv && custom_csrs.cpt_config(62))
-  	//decode_units(w).io.enableCPT			 := custom_csrs.cpt_config(0)
-    //yh+end
+		//decode_units(w).io.enableDPT       := ((csr.io.status.prv === 0.U) /* User Priv */ && custom_csrs.dpt_config(62))
+		decode_units(w).io.enableDPT			 := custom_csrs.dpt_config(62) //yh+
+
     dec_uops(w) := decode_units(w).io.deq.uop
   }
 
@@ -701,9 +695,10 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
                       || ren_stalls(w)
                       || io.lsu.ldq_full(w) && dis_uops(w).uses_ldq
                       //yh-|| io.lsu.stq_full(w) && dis_uops(w).uses_stq
-                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).edg_cmd === 0.U) //yh+
+                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).cap_cmd === 0.U) //yh+
                       //yh+begin
-                      || io.lsu.ssq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).edg_cmd =/= 0.U)
+                      || io.lsu.slq_full(w) && dis_uops(w).uses_ldq && dis_uops(w).needCC
+                      || io.lsu.ssq_full(w) && dis_uops(w).uses_stq && dis_uops(w).needCC
                       //yh+end
                       || !dispatcher.io.ren_uops(w).ready
                       || wait_for_empty_pipeline(w)
@@ -729,6 +724,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     dis_uops(w).ldq_idx := io.lsu.dis_ldq_idx(w)
     dis_uops(w).stq_idx := io.lsu.dis_stq_idx(w)
     //yh+begin
+    dis_uops(w).slq_idx := io.lsu.dis_slq_idx(w)
     dis_uops(w).ssq_idx := io.lsu.dis_ssq_idx(w)
     //yh+end
   }
@@ -1042,7 +1038,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
       //yh-Causes.fetch_page_fault.U)
 			//yh+begin
       Causes.fetch_page_fault.U,
-      Causes.estr_fault.U)
+      Causes.cstr_fault.U)
 			//yh+end
 
   csr.io.tval := Mux(tval_valid,
@@ -1052,8 +1048,8 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   when (tval_valid) {
     printf("[%d] Found tval_valid at core tval: %x\n",
             debug_tsc_reg, csr.io.tval)
-    when (csr.io.cause === Causes.estr_fault.U) {
-      printf("[%d] Found estr_fault at core: %x\n",
+    when (csr.io.cause === Causes.cstr_fault.U) {
+      printf("[%d] Found cstr_fault at core: %x\n",
               debug_tsc_reg, csr.io.tval)
     }
   }
@@ -1348,6 +1344,14 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
         reset.asBool) {
     idle_cycles := 0.U
   }
+  ////yh+begin
+  //when (idle_cycles.value(13)) {
+  //  assert (!(wait_for_empty_pipeline.reduce(_||_) && (io.lsu.slq_nonempty || io.lsu.ssq_nonempty)))
+  //  assert (!io.lsu.slq_nonempty || !io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //  assert (!io.lsu.slq_nonempty || io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //  assert (io.lsu.slq_nonempty || !io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //}
+  ////yh+end
   assert (!(idle_cycles.value(13)), "Pipeline has hung.")
 
   if (usingFPU) {
@@ -1355,44 +1359,85 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   }
 
   //yh+begin
-  val cpt_csrs = Wire(new CptCSRs)
-  cpt_csrs.emt_base := custom_csrs.cpt_config(47,0)
-  cpt_csrs.num_ways := custom_csrs.cpt_config(59,48)
+  val dpt_csrs = Wire(new DptCSRs)
+  dpt_csrs.hbt_base := custom_csrs.dpt_config(47,0)
+  dpt_csrs.num_ways := custom_csrs.dpt_config(59,48)
+
+  //val debug_rs1_data = RegInit(0.U(xLen.W))
+  ////val debug_rs2_data = RegInit(0.U(xLen.W))
+  //val debug_imm_packed = RegInit(0.U(xLen.W))
 
   for (i <- 0 until memWidth) {
     mem_units(i).io.lsu_cap_io <> io.lsu.cap_exe(i)
-    mem_units(i).io.cpt_csrs := cpt_csrs
+    mem_units(i).io.dpt_csrs := dpt_csrs
+
+    //when (io.lsu.cap_exe(i).cap_req.valid && io.lsu.cap_exe(i).cap_req.bits.tagged &&
+    //      (io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_load || io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_sta)) {
+    //  debug_rs1_data := io.lsu.cap_exe(i).cap_req.bits.rs1_data
+    //  //debug_rs2_data := io.lsu.cap_exe(i).bits.cap_req.rs2_data
+    //  //debug_imm_packed := Cat(csr.io.status.dprv, io.lsu.cap_exe(i).cap_req.bits.imm_packed)
+
+    //  printf("[%d] Found tagged LD/ST rs1_data: %x imm: %x\n",
+    //          debug_tsc_reg, io.lsu.cap_exe(i).cap_req.bits.rs1_data, 
+    //          Cat(csr.io.status.dprv, io.lsu.cap_exe(i).cap_req.bits.imm_packed))
+    //}
+    //when (io.lsu.cap_exe(i).cap_req.valid && io.lsu.cap_exe(i).cap_req.bits.tagged &&
+    //      (io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_load || io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_sta) &&
+    //      (csr.io.status.dprv > 0.U)) {
+    //  debug_imm_packed := io.lsu.cap_exe(i).cap_req.bits.rs1_data
+    //}
   }
 
-	printf("[%d] cpt_config: %x\n", debug_tsc_reg, custom_csrs.cpt_config)
+  io.lsu.dpt_csrs.enableDPT         	:= custom_csrs.dpt_config(62)
+  io.lsu.dpt_csrs.enableStats         := custom_csrs.dpt_config(61)
+  rob.io.dpt_csrs.enableStats         := custom_csrs.dpt_config(61)
+  io.lsu.dpt_csrs.num_ways         		:= custom_csrs.dpt_config(59,48)
+  //io.lsu.dpt_csrs.bounds_margin       := custom_csrs.bounds_margin
+  rob.io.dpt_csrs.num_tagd   			    := custom_csrs.num_tagd
+  rob.io.dpt_csrs.num_xtag   			    := custom_csrs.num_xtag
+  io.lsu.dpt_csrs.num_tagged_store   	:= custom_csrs.num_tagged_store
+  io.lsu.dpt_csrs.num_untagged_store 	:= custom_csrs.num_untagged_store
+  io.lsu.dpt_csrs.num_tagged_load   	:= custom_csrs.num_tagged_load
+  io.lsu.dpt_csrs.num_untagged_load  	:= custom_csrs.num_untagged_load
+  io.lsu.dpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
+  io.lsu.dpt_csrs.bounds_traffic     	:= custom_csrs.bounds_traffic
+  rob.io.dpt_csrs.num_inst   			    := custom_csrs.num_inst
+  io.lsu.dpt_csrs.num_store_hit   		:= custom_csrs.num_store_hit
+  io.lsu.dpt_csrs.num_load_hit   			:= custom_csrs.num_load_hit
+  //io.lsu.dpt_csrs.num_cstr   			    := custom_csrs.num_cstr
+  //io.lsu.dpt_csrs.num_cclr   			    := custom_csrs.num_cclr
+  //io.lsu.dpt_csrs.num_csrch  			    := custom_csrs.num_csrch
+  //io.lsu.dpt_csrs.num_csrch_hit		    := custom_csrs.num_csrch_hit
+  //io.lsu.dpt_csrs.num_cstr_itr		    := custom_csrs.num_cstr_itr
+  //io.lsu.dpt_csrs.num_cclr_itr		    := custom_csrs.num_cclr_itr
+  //io.lsu.dpt_csrs.num_csrch_itr		    := custom_csrs.num_csrch_itr
+  //io.lsu.dpt_csrs.num_chk_fail        := custom_csrs.num_chk_fail
+  //io.lsu.dpt_csrs.num_cstr_fail       := custom_csrs.num_cstr_fail
+  //io.lsu.dpt_csrs.num_cclr_fail       := custom_csrs.num_cclr_fail
 
-  io.lsu.cpt_csrs.enableCPT         	:= custom_csrs.cpt_config(62)
-  io.lsu.cpt_csrs.user_priv       		:= user_priv
-  rob.io.cpt_csrs.enableCPT         	:= custom_csrs.cpt_config(62)
-  rob.io.cpt_csrs.user_priv       		:= user_priv
-  io.lsu.cpt_csrs.num_ways         		:= custom_csrs.cpt_config(59,48)
-  rob.io.cpt_csrs.num_inst   			    := custom_csrs.num_inst
-  rob.io.cpt_csrs.num_tagc         	  := custom_csrs.num_tagc
-  io.lsu.cpt_csrs.num_echk   					:= custom_csrs.num_echk
-  io.lsu.cpt_csrs.num_estr   					:= custom_csrs.num_estr
-  io.lsu.cpt_csrs.num_eclr   					:= custom_csrs.num_eclr
-  io.lsu.cpt_csrs.num_eact   					:= custom_csrs.num_eact
-  io.lsu.cpt_csrs.num_edea   					:= custom_csrs.num_edea
-  io.lsu.cpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
-  io.lsu.cpt_csrs.edge_traffic     		:= custom_csrs.edge_traffic
-  io.lsu.cpt_csrs.num_ecache_hit   		:= custom_csrs.num_ecache_hit
-
-  csr.io.cpt_config       	:= custom_csrs.cpt_config
-  csr.io.num_inst           := rob.io.num_inst
-  csr.io.num_tagc           := rob.io.num_tagc
-  csr.io.num_echk           := io.lsu.num_echk
-  csr.io.num_estr           := io.lsu.num_estr
-  csr.io.num_eclr           := io.lsu.num_eclr
-  csr.io.num_eact           := io.lsu.num_eact
-  csr.io.num_edea           := io.lsu.num_edea
+  csr.io.dpt_config       	:= custom_csrs.dpt_config
+  //csr.io.bounds_margin      := custom_csrs.bounds_margin
+  csr.io.num_tagd           := rob.io.num_tagd
+  csr.io.num_xtag           := rob.io.num_xtag
+  csr.io.num_tagged_store   := io.lsu.num_tagged_store
+  csr.io.num_untagged_store := io.lsu.num_untagged_store
+  csr.io.num_tagged_load    := io.lsu.num_tagged_load
+  csr.io.num_untagged_load  := io.lsu.num_untagged_load
   csr.io.ldst_traffic       := io.lsu.ldst_traffic
-  csr.io.edge_traffic     	:= io.lsu.edge_traffic
-  csr.io.num_ecache_hit    	:= io.lsu.num_ecache_hit
+  csr.io.bounds_traffic     := io.lsu.bounds_traffic
+  csr.io.num_inst           := rob.io.num_inst
+  csr.io.num_store_hit    	:= io.lsu.num_store_hit
+  csr.io.num_load_hit    		:= io.lsu.num_load_hit
+  //csr.io.num_cstr           := io.lsu.num_cstr
+  //csr.io.num_cclr           := io.lsu.num_cclr
+  //csr.io.num_csrch          := io.lsu.num_csrch
+  //csr.io.num_csrch_hit      := io.lsu.num_csrch_hit
+  //csr.io.num_cstr_itr       := io.lsu.num_cstr_itr
+  //csr.io.num_cclr_itr       := io.lsu.num_cclr_itr
+  //csr.io.num_csrch_itr      := io.lsu.num_csrch_itr
+  //csr.io.num_chk_fail       := io.lsu.num_chk_fail
+  //csr.io.num_cstr_fail      := io.lsu.num_cstr_fail
+  //csr.io.num_cclr_fail      := io.lsu.num_cclr_fail
   //yh+end
 
   //-------------------------------------------------------------

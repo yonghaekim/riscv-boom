@@ -121,14 +121,12 @@ trait ScalarOpConstants
   val RT_PAS   = 3.U(2.W) // pass-through (prs1 := lrs1, etc)
   val RT_X     = 2.U(2.W) // not-a-register (but shouldn't get a busy-bit, etc.)
                              // TODO rename RT_NAR
-
-  //yh+begin
-  val EDG_CHK = 1.U(3.W) // echk
-  val EDG_STR = 2.U(3.W) // estr
-  val EDG_CLR = 3.U(3.W) // eclr
-  val EDG_ACT = 4.U(3.W) // eact
-  val EDG_DEA = 5.U(3.W) // edea
-  //yh+end
+	//yh+begin
+	val CAP_MEM = 0.U(2.W) // ldst
+	val CAP_STR = 1.U(2.W) // cstr
+	val CAP_CLR = 2.U(2.W) // cclr
+	val CAP_SRC = 3.U(2.W) // csrch
+	//yh+end
 
   // Micro-op opcodes
   // TODO change micro-op opcodes into using enum
@@ -210,9 +208,9 @@ trait ScalarOpConstants
   //               =  66.U(UOPC_SZ.W)
   val uopAMO_AG    =  67.U(UOPC_SZ.W) // AMO-address gen (use normal STD for datagen)
 
-  val uopFMV_W_X   =  68.U(UOPC_SZ.W)
+  val uopFMV_S_X   =  68.U(UOPC_SZ.W)
   val uopFMV_D_X   =  69.U(UOPC_SZ.W)
-  val uopFMV_X_W   =  70.U(UOPC_SZ.W)
+  val uopFMV_X_S   =  70.U(UOPC_SZ.W)
   val uopFMV_X_D   =  71.U(UOPC_SZ.W)
 
   val uopFSGNJ_S   =  72.U(UOPC_SZ.W)
@@ -266,9 +264,10 @@ trait ScalarOpConstants
 
   val uopMOV       = 109.U(UOPC_SZ.W) // conditional mov decoded from "add rd, x0, rs2"
 
-	//yh+begin
-  val uopTAGC      = 120.U(UOPC_SZ.W) 
-	//yh+end
+  //yh+begin
+  val uopTAGD      = 120.U(UOPC_SZ.W) 
+  val uopXTAG      = 121.U(UOPC_SZ.W)
+  //yh+end
 
   // The Bubble Instruction (Machine generated NOP)
   // Insert (XOR x0,x0,x0) which is different from software compiler
@@ -289,9 +288,10 @@ trait ScalarOpConstants
     uop.dst_rtype  := RT_X
     //yh+begin
     uop.uses_ssq   := false.B
+    uop.uses_slq   := false.B
     uop.needCC 		 := false.B
-    uop.is_edgld   := false.B
-    uop.edg_cmd    := 0.U
+    uop.is_capld	 := false.B
+		uop.cap_cmd    := 0.U
     //yh+end
 
     val cs = Wire(new boom.common.CtrlSignals())
@@ -331,6 +331,7 @@ trait RISCVConstants
   val LONGEST_IMM_SZ = 20
   val X0 = 0.U
   val RA = 1.U // return address register
+	val SP = 2.U // stack pointer //yh+
 
   // memory consistency model
   // The C/C++ atomics MCM requires that two loads to the same address maintain program order.
