@@ -15,17 +15,19 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.random._
 import chisel3.internal.sourceinfo.{SourceInfo}
+import chisel3.experimental.{chiselName}
 
-import org.chipsalliance.cde.config.{Parameters}
+import freechips.rocketchip.config.{Parameters}
+import freechips.rocketchip.subsystem.{RocketTilesKey}
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 import freechips.rocketchip.rocket.{HasL1ICacheParameters, ICacheParams, ICacheErrors, ICacheReq}
-
-
-
+import freechips.rocketchip.diplomaticobjectmodel.logicaltree.{LogicalTreeNode}
+import freechips.rocketchip.diplomaticobjectmodel.DiplomaticObjectModelAddressing
+import freechips.rocketchip.diplomaticobjectmodel.model.{OMComponent, OMICache, OMECC}
 
 import boom.common._
 import boom.util.{BoomCoreStringPrefix}
@@ -49,6 +51,27 @@ class ICache(
 
   val size = icacheParams.nSets * icacheParams.nWays * icacheParams.blockBytes
   private val wordBytes = icacheParams.fetchBytes
+}
+class BoomICacheLogicalTreeNode(icache: ICache, deviceOpt: Option[SimpleDevice], params: ICacheParams) extends LogicalTreeNode(() => deviceOpt) {
+  override def getOMComponents(resourceBindings: ResourceBindings, children: Seq[OMComponent] = Nil): Seq[OMComponent] = {
+    Seq(
+      OMICache(
+        memoryRegions = DiplomaticObjectModelAddressing.getOMMemoryRegions("ITIM", resourceBindings),
+        interrupts = Nil,
+        nSets = params.nSets,
+        nWays = params.nWays,
+        blockSizeBytes = params.blockBytes,
+        dataMemorySizeBytes = params.nSets * params.nWays * params.blockBytes,
+        dataECC = params.dataECC.map(OMECC.fromString),
+        tagECC = params.tagECC.map(OMECC.fromString),
+        nTLBEntries = params.nTLBSets * params.nTLBWays,
+        nTLBSets = params.nTLBSets,
+        nTLBWays = params.nTLBWays,
+        maxTimSize = params.nSets * (params.nWays-1) * params.blockBytes,
+        memories = icache.module.asInstanceOf[ICacheModule].dataArrays.map(_._2)
+      )
+    )
+  }
 }
 
 /**
@@ -102,6 +125,7 @@ object GetPropertyByHartId
  *
  * @param outer top level ICache class
  */
+@chiselName
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   with HasBoomFrontendParameters
 {
@@ -115,7 +139,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   require(pgIdxBits >= untagBits)
 
   // How many bits do we intend to fetch at most every cycle?
-  val wordBits = outer.icacheParams.fetchBytes*8
+  //yh-val wordBits = outer.icacheParams.fetchBytes*8
+  val wordBits = outer.icacheParams.fetchBytes*8*4 //yh+
   // Each of these cases require some special-case handling.
   require (tl_out.d.bits.data.getWidth == wordBits || (2*tl_out.d.bits.data.getWidth == wordBits && nBanks == 2))
   // If TL refill is half the wordBits size and we have two banks, then the
@@ -134,6 +159,9 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s2_valid = RegNext(s1_valid && !io.s1_kill)
   val s2_hit = RegNext(s1_hit)
 
+
+	//printf("tagBits: %d untagBits: %d blockOffBits: %d lgCacheBlockBytes: %d refillCycles: %d\n",
+	//				tagBits.asUInt, untagBits.asUInt, blockOffBits.asUInt, lgCacheBlockBytes.asUInt, refillCycles.asUInt) //yh+
 
   val invalidated = Reg(Bool())
   val refill_valid = RegInit(false.B)
@@ -193,7 +221,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       DescribedSRAM(
         name = s"dataArrayWay_${x}",
         desc = "ICache Data Array",
-        size = ramDepth,
+        size = nSets * refillCycles,
         data = UInt((wordBits).W)
       )
     }
@@ -203,21 +231,21 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       DescribedSRAM(
         name = s"dataArrayB0Way_${x}",
         desc = "ICache Data Array",
-        size = ramDepth,
+        size = nSets * refillCycles,
         data = UInt((wordBits/nBanks).W)
       )} ++
     (0 until nWays).map { x =>
       DescribedSRAM(
         name = s"dataArrayB1Way_${x}",
         desc = "ICache Data Array",
-        size = ramDepth,
+        size = nSets * refillCycles,
         data = UInt((wordBits/nBanks).W)
       )}
   }
   if (nBanks == 1) {
     // Use unbanked icache for narrow accesses.
     s1_bankid := 0.U
-    for ((dataArray, i) <- dataArrays.zipWithIndex) {
+    for ((dataArray, i) <- dataArrays.map(_._1) zipWithIndex) {
       def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
       val s0_ren = s0_valid
 
@@ -235,8 +263,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     }
   } else {
     // Use two banks, interleaved.
-    val dataArraysB0 = dataArrays.take(nWays)
-    val dataArraysB1 = dataArrays.drop(nWays)
+    val dataArraysB0 = dataArrays.map(_._1).take(nWays)
+    val dataArraysB1 = dataArrays.map(_._1).drop(nWays)
     require (nBanks == 2)
 
     // Bank0 row's id wraps around if Bank1 is the starting bank.
@@ -302,6 +330,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       }
     }
   }
+	val s2_beat_sel = RegNext(io.s1_paddr(blockOffBits-2,blockOffBits-3)) //yh+
   val s2_tag_hit = RegNext(s1_tag_hit)
   val s2_hit_way = OHToUInt(s2_tag_hit)
   val s2_bankid = RegNext(s1_bankid)
@@ -321,7 +350,22 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       s2_unbanked_data
     }
 
-  io.resp.bits.data := s2_data
+  //yh-io.resp.bits.data := s2_data
+	//yh+begin
+  io.resp.bits.data := Mux(s2_beat_sel === 3.U, s2_data(wordBits*4/4-1,wordBits*3/4),
+													Mux(s2_beat_sel === 2.U, s2_data(wordBits*3/4-1,wordBits*2/4),
+													Mux(s2_beat_sel === 1.U, s2_data(wordBits*2/4-1,wordBits*1/4),
+													s2_data(wordBits*1/4-1,0))))
+	//printf("s1_paddr: %x s2_beat_sel: %x resp.data: %x s2_data: %x\n",
+	//			RegNext(io.s1_paddr), s2_beat_sel, 
+	//			Mux(s2_beat_sel === 3.U, s2_data(wordBits*4/4-1,wordBits*3/4),
+	//					Mux(s2_beat_sel === 2.U, s2_data(wordBits*3/4-1,wordBits*2/4),
+	//					Mux(s2_beat_sel === 1.U, s2_data(wordBits*2/4-1,wordBits*1/4),
+	//					s2_data(wordBits*1/4-1,0))))
+	//			, s2_data)
+	//printf("s2_bankid: %x s2_bank0_data: %x s2_bank1_data: %x\n",
+	//				s2_bankid, s2_bank0_data, s2_bank1_data)
+	//yh+end
   io.resp.valid := s2_valid && s2_hit
 
   tl_out.a.valid := s2_miss && !refill_valid && !io.s2_kill

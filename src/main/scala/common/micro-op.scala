@@ -14,7 +14,7 @@ package boom.common
 import chisel3._
 import chisel3.util._
 
-import org.chipsalliance.cde.config.Parameters
+import freechips.rocketchip.config.Parameters
 
 import boom.exu.FUConstants
 
@@ -77,6 +77,10 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   val rob_idx          = UInt(robAddrSz.W)
   val ldq_idx          = UInt(ldqAddrSz.W)
   val stq_idx          = UInt(stqAddrSz.W)
+  //yh+begin
+  val slq_idx          = UInt(slqAddrSz.W)
+  val ssq_idx          = UInt(ssqAddrSz.W)
+  //yh+end
   val rxq_idx          = UInt(log2Ceil(numRxqEntries).W)
   val pdst             = UInt(maxPregSz.W)
   val prs1             = UInt(maxPregSz.W)
@@ -100,6 +104,13 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   val is_amo           = Bool()
   val uses_ldq         = Bool()
   val uses_stq         = Bool()
+  //yh+begin
+  val needCC		       = Bool()
+  val uses_slq         = Bool()
+  val uses_ssq         = Bool()
+  val is_capld    		 = Bool()
+  val cap_cmd          = UInt(2.W)
+  //yh+end
   val is_sys_pc2epc    = Bool()                      // Is a ECall or Breakpoint -- both set EPC to PC.
   val is_unique        = Bool()                      // only allow this instruction in the pipeline, wait for STQ to
                                                      // drain, clear fetcha fter it (tell ROB to un-ready until empty)
@@ -165,7 +176,7 @@ class CtrlSignals extends Bundle()
   val op1_sel     = UInt(OP1_X.getWidth.W)
   val op2_sel     = UInt(OP2_X.getWidth.W)
   val imm_sel     = UInt(IS_X.getWidth.W)
-  val op_fcn      = UInt((new freechips.rocketchip.rocket.ALUFN).SZ_ALU_FN.W)
+  val op_fcn      = UInt(freechips.rocketchip.rocket.ALU.SZ_ALU_FN.W)
   val fcn_dw      = Bool()
   val csr_cmd     = UInt(freechips.rocketchip.rocket.CSR.SZ.W)
   val is_load     = Bool()   // will invoke TLB address lookup

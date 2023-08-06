@@ -33,12 +33,13 @@ import java.nio.file.{Paths}
 import chisel3._
 import chisel3.util._
 
-import org.chipsalliance.cde.config.Parameters
+import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.rocket.Instructions._
-import freechips.rocketchip.tile.{TraceBundle}
-import freechips.rocketchip.rocket.{Causes, PRV, TracedInstruction}
+import freechips.rocketchip.rocket.{Causes, PRV}
 import freechips.rocketchip.util.{Str, UIntIsOneOf, CoreMonitorBundle}
 import freechips.rocketchip.devices.tilelink.{PLICConsts, CLINTConsts}
+
+import testchipip.{ExtendedTracedInstruction}
 
 import boom.common._
 import boom.ifu.{GlobalHistory, HasBoomFrontendParameters}
@@ -48,7 +49,7 @@ import boom.util._
 /**
  * Top level core object that connects the Frontend to the rest of the pipeline.
  */
-class BoomCore()(implicit p: Parameters) extends BoomModule
+class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   with HasBoomFrontendParameters // TODO: Don't add this trait
 {
   val io = new freechips.rocketchip.tile.CoreBundle
@@ -60,7 +61,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     val rocc = Flipped(new freechips.rocketchip.tile.RoCCCoreIO())
     val lsu = Flipped(new boom.lsu.LSUCoreIO)
     val ptw_tlb = new freechips.rocketchip.rocket.TLBPTWIO()
-    val trace = Output(new TraceBundle)
+    val trace = Output(Vec(coreParams.retireWidth, new ExtendedTracedInstruction))
     val fcsr_rm = UInt(freechips.rocketchip.tile.FPConstants.RM_SZ.W)
   }
   //**********************************
@@ -130,9 +131,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
                                                                    (if (usingRoCC) 1 else 0)))
   val iregister_read   = Module(new RegisterRead(
                            issue_units.map(_.issueWidth).sum,
-                           exe_units.withFilter(_.readsIrf).map(_.supportedFuncUnits).toSeq,
+                           exe_units.withFilter(_.readsIrf).map(_.supportedFuncUnits),
                            numIrfReadPorts,
-                           exe_units.withFilter(_.readsIrf).map(x => 2).toSeq,
+                           exe_units.withFilter(_.readsIrf).map(x => 2),
                            exe_units.numTotalBypassPorts,
                            jmp_unit.numBypassStages,
                            xLen))
@@ -236,6 +237,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   for (i <- 0 until memWidth) {
     mem_units(i).io.lsu_io <> io.lsu.exe(i)
   }
+
 
   //-------------------------------------------------------------
   // Uarch Hardware Performance Events (HPEs)
@@ -505,6 +507,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     decode_units(w).io.csr_decode      <> csr.io.decode(w)
     decode_units(w).io.interrupt       := csr.io.interrupt
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
+		//decode_units(w).io.enableDPT       := ((csr.io.status.prv === 0.U) /* User Priv */ && custom_csrs.dpt_config(62))
+		decode_units(w).io.enableDPT			 := custom_csrs.dpt_config(62) //yh+
 
     dec_uops(w) := decode_units(w).io.deq.uop
   }
@@ -690,7 +694,12 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
                       (  !rob.io.ready
                       || ren_stalls(w)
                       || io.lsu.ldq_full(w) && dis_uops(w).uses_ldq
-                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      //yh-|| io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq && (dis_uops(w).cap_cmd === 0.U) //yh+
+                      //yh+begin
+                      || io.lsu.slq_full(w) && dis_uops(w).uses_ldq && dis_uops(w).needCC
+                      || io.lsu.ssq_full(w) && dis_uops(w).uses_stq && dis_uops(w).needCC
+                      //yh+end
                       || !dispatcher.io.ren_uops(w).ready
                       || wait_for_empty_pipeline(w)
                       || wait_for_rocc(w)
@@ -714,6 +723,10 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     // Dispatching instructions request load/store queue entries when they can proceed.
     dis_uops(w).ldq_idx := io.lsu.dis_ldq_idx(w)
     dis_uops(w).stq_idx := io.lsu.dis_stq_idx(w)
+    //yh+begin
+    dis_uops(w).slq_idx := io.lsu.dis_slq_idx(w)
+    dis_uops(w).ssq_idx := io.lsu.dis_ssq_idx(w)
+    //yh+end
   }
 
   //-------------------------------------------------------------
@@ -1022,10 +1035,25 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
       Causes.fetch_access.U,
       Causes.load_page_fault.U,
       Causes.store_page_fault.U,
-      Causes.fetch_page_fault.U)
+      //yh-Causes.fetch_page_fault.U)
+			//yh+begin
+      Causes.fetch_page_fault.U,
+      Causes.cstr_fault.U)
+			//yh+end
 
   csr.io.tval := Mux(tval_valid,
     RegNext(encodeVirtualAddress(rob.io.com_xcpt.bits.badvaddr, rob.io.com_xcpt.bits.badvaddr)), 0.U)
+
+  //yh+begin
+  when (tval_valid) {
+    printf("[%d] Found tval_valid at core tval: %x\n",
+            debug_tsc_reg, csr.io.tval)
+    when (csr.io.cause === Causes.cstr_fault.U) {
+      printf("[%d] Found cstr_fault at core: %x\n",
+              debug_tsc_reg, csr.io.tval)
+    }
+  }
+  //yh+end
 
   // TODO move this function to some central location (since this is used elsewhere).
   def encodeVirtualAddress(a0: UInt, ea: UInt) =
@@ -1185,7 +1213,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     // Connect FPIU
     ll_wbarb.io.in(1)        <> fp_pipeline.io.to_int
     // Connect FLDs
-    fp_pipeline.io.ll_wports <> exe_units.memory_units.map(_.io.ll_fresp).toSeq
+    fp_pipeline.io.ll_wports <> exe_units.memory_units.map(_.io.ll_fresp)
   }
   if (usingRoCC) {
     require(usingFPU)
@@ -1281,6 +1309,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   rob.io.lsu_clr_bsy    := io.lsu.clr_bsy
   rob.io.lsu_clr_unsafe := io.lsu.clr_unsafe
   rob.io.lxcpt          <> io.lsu.lxcpt
+  rob.io.lsu_clr_needCC := io.lsu.clr_needCC //yh+
 
   assert (!(csr.io.singleStep), "[core] single-step is unsupported.")
 
@@ -1315,11 +1344,101 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
         reset.asBool) {
     idle_cycles := 0.U
   }
+  ////yh+begin
+  //when (idle_cycles.value(13)) {
+  //  assert (!(wait_for_empty_pipeline.reduce(_||_) && (io.lsu.slq_nonempty || io.lsu.ssq_nonempty)))
+  //  assert (!io.lsu.slq_nonempty || !io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //  assert (!io.lsu.slq_nonempty || io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //  assert (io.lsu.slq_nonempty || !io.lsu.ssq_nonempty, "Pipeline has hung.")
+  //}
+  ////yh+end
   assert (!(idle_cycles.value(13)), "Pipeline has hung.")
 
   if (usingFPU) {
     fp_pipeline.io.debug_tsc_reg := debug_tsc_reg
   }
+
+  //yh+begin
+  val dpt_csrs = Wire(new DptCSRs)
+  dpt_csrs.hbt_base := custom_csrs.dpt_config(47,0)
+  dpt_csrs.num_ways := custom_csrs.dpt_config(59,48)
+
+  //val debug_rs1_data = RegInit(0.U(xLen.W))
+  ////val debug_rs2_data = RegInit(0.U(xLen.W))
+  //val debug_imm_packed = RegInit(0.U(xLen.W))
+
+  for (i <- 0 until memWidth) {
+    mem_units(i).io.lsu_cap_io <> io.lsu.cap_exe(i)
+    mem_units(i).io.dpt_csrs := dpt_csrs
+
+    //when (io.lsu.cap_exe(i).cap_req.valid && io.lsu.cap_exe(i).cap_req.bits.tagged &&
+    //      (io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_load || io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_sta)) {
+    //  debug_rs1_data := io.lsu.cap_exe(i).cap_req.bits.rs1_data
+    //  //debug_rs2_data := io.lsu.cap_exe(i).bits.cap_req.rs2_data
+    //  //debug_imm_packed := Cat(csr.io.status.dprv, io.lsu.cap_exe(i).cap_req.bits.imm_packed)
+
+    //  printf("[%d] Found tagged LD/ST rs1_data: %x imm: %x\n",
+    //          debug_tsc_reg, io.lsu.cap_exe(i).cap_req.bits.rs1_data, 
+    //          Cat(csr.io.status.dprv, io.lsu.cap_exe(i).cap_req.bits.imm_packed))
+    //}
+    //when (io.lsu.cap_exe(i).cap_req.valid && io.lsu.cap_exe(i).cap_req.bits.tagged &&
+    //      (io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_load || io.lsu.cap_exe(i).cap_req.bits.uop.ctrl.is_sta) &&
+    //      (csr.io.status.dprv > 0.U)) {
+    //  debug_imm_packed := io.lsu.cap_exe(i).cap_req.bits.rs1_data
+    //}
+  }
+
+  io.lsu.dpt_csrs.enableDPT         	:= custom_csrs.dpt_config(62)
+  io.lsu.dpt_csrs.enableStats         := custom_csrs.dpt_config(61)
+  rob.io.dpt_csrs.enableStats         := custom_csrs.dpt_config(61)
+  io.lsu.dpt_csrs.num_ways         		:= custom_csrs.dpt_config(59,48)
+  //io.lsu.dpt_csrs.bounds_margin       := custom_csrs.bounds_margin
+  rob.io.dpt_csrs.num_tagd   			    := custom_csrs.num_tagd
+  rob.io.dpt_csrs.num_xtag   			    := custom_csrs.num_xtag
+  io.lsu.dpt_csrs.num_tagged_store   	:= custom_csrs.num_tagged_store
+  io.lsu.dpt_csrs.num_untagged_store 	:= custom_csrs.num_untagged_store
+  io.lsu.dpt_csrs.num_tagged_load   	:= custom_csrs.num_tagged_load
+  io.lsu.dpt_csrs.num_untagged_load  	:= custom_csrs.num_untagged_load
+  io.lsu.dpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
+  io.lsu.dpt_csrs.bounds_traffic     	:= custom_csrs.bounds_traffic
+  rob.io.dpt_csrs.num_inst   			    := custom_csrs.num_inst
+  io.lsu.dpt_csrs.num_store_hit   		:= custom_csrs.num_store_hit
+  io.lsu.dpt_csrs.num_load_hit   			:= custom_csrs.num_load_hit
+  //io.lsu.dpt_csrs.num_cstr   			    := custom_csrs.num_cstr
+  //io.lsu.dpt_csrs.num_cclr   			    := custom_csrs.num_cclr
+  //io.lsu.dpt_csrs.num_csrch  			    := custom_csrs.num_csrch
+  //io.lsu.dpt_csrs.num_csrch_hit		    := custom_csrs.num_csrch_hit
+  //io.lsu.dpt_csrs.num_cstr_itr		    := custom_csrs.num_cstr_itr
+  //io.lsu.dpt_csrs.num_cclr_itr		    := custom_csrs.num_cclr_itr
+  //io.lsu.dpt_csrs.num_csrch_itr		    := custom_csrs.num_csrch_itr
+  //io.lsu.dpt_csrs.num_chk_fail        := custom_csrs.num_chk_fail
+  //io.lsu.dpt_csrs.num_cstr_fail       := custom_csrs.num_cstr_fail
+  //io.lsu.dpt_csrs.num_cclr_fail       := custom_csrs.num_cclr_fail
+
+  csr.io.dpt_config       	:= custom_csrs.dpt_config
+  //csr.io.bounds_margin      := custom_csrs.bounds_margin
+  csr.io.num_tagd           := rob.io.num_tagd
+  csr.io.num_xtag           := rob.io.num_xtag
+  csr.io.num_tagged_store   := io.lsu.num_tagged_store
+  csr.io.num_untagged_store := io.lsu.num_untagged_store
+  csr.io.num_tagged_load    := io.lsu.num_tagged_load
+  csr.io.num_untagged_load  := io.lsu.num_untagged_load
+  csr.io.ldst_traffic       := io.lsu.ldst_traffic
+  csr.io.bounds_traffic     := io.lsu.bounds_traffic
+  csr.io.num_inst           := rob.io.num_inst
+  csr.io.num_store_hit    	:= io.lsu.num_store_hit
+  csr.io.num_load_hit    		:= io.lsu.num_load_hit
+  //csr.io.num_cstr           := io.lsu.num_cstr
+  //csr.io.num_cclr           := io.lsu.num_cclr
+  //csr.io.num_csrch          := io.lsu.num_csrch
+  //csr.io.num_csrch_hit      := io.lsu.num_csrch_hit
+  //csr.io.num_cstr_itr       := io.lsu.num_cstr_itr
+  //csr.io.num_cclr_itr       := io.lsu.num_cclr_itr
+  //csr.io.num_csrch_itr      := io.lsu.num_csrch_itr
+  //csr.io.num_chk_fail       := io.lsu.num_chk_fail
+  //csr.io.num_cstr_fail      := io.lsu.num_cstr_fail
+  //csr.io.num_cclr_fail      := io.lsu.num_cclr_fail
+  //yh+end
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------
@@ -1427,22 +1546,17 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     }
   }
 
-  io.trace := DontCare
-  io.trace.time := csr.io.time
-  io.trace.insns map (t => t.valid := false.B)
-  io.trace.custom.get.asInstanceOf[BoomTraceBundle].rob_empty := rob.io.empty
-
-  if (trace) {
+  if (usingTrace) {
     for (w <- 0 until coreWidth) {
       // Delay the trace so we have a cycle to pull PCs out of the FTQ
-      io.trace.insns(w).valid      := RegNext(rob.io.commit.arch_valids(w))
+      io.trace(w).valid      := RegNext(rob.io.commit.arch_valids(w))
 
       // Recalculate the PC
       io.ifu.debug_ftq_idx(w) := rob.io.commit.uops(w).ftq_idx
       val iaddr = (AlignPCToBoundary(io.ifu.debug_fetch_pc(w), icBlockBytes)
                    + RegNext(rob.io.commit.uops(w).pc_lob)
                    - Mux(RegNext(rob.io.commit.uops(w).edge_inst), 2.U, 0.U))(vaddrBits-1,0)
-      io.trace.insns(w).iaddr      := Sext(iaddr, xLen)
+      io.trace(w).iaddr      := Sext(iaddr, xLen)
 
       def getInst(uop: MicroOp, inst: UInt): UInt = {
         Mux(uop.is_rvc, Cat(0.U(16.W), inst(15,0)), inst)
@@ -1454,8 +1568,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
 
       // use debug_insts instead of uop.debug_inst to use the rob's debug_inst_mem
       // note: rob.debug_insts comes 1 cycle later
-      io.trace.insns(w).insn       := getInst(RegNext(rob.io.commit.uops(w)), rob.io.commit.debug_insts(w))
-      io.trace.insns(w).wdata.map { _ := RegNext(getWdata(rob.io.commit.uops(w), rob.io.commit.debug_wdata(w))) }
+      io.trace(w).insn       := getInst(RegNext(rob.io.commit.uops(w)), rob.io.commit.debug_insts(w))
+      io.trace(w).wdata.map { _ := RegNext(getWdata(rob.io.commit.uops(w), rob.io.commit.debug_wdata(w))) }
 
       // Comment out this assert because it blows up FPGA synth-asserts
       // This tests correctedness of the debug_inst mem
@@ -1464,20 +1578,22 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
       // }
       // This tests correctedness of recovering pcs through ftq debug ports
       // when (RegNext(rob.io.commit.valids(w))) {
-      //   assert(Sext(io.trace.insns(w).iaddr, xLen) ===
+      //   assert(Sext(io.trace(w).iaddr, xLen) ===
       //     RegNext(Sext(rob.io.commit.uops(w).debug_pc(vaddrBits-1,0), xLen)))
       // }
 
       // These csr signals do not exactly match up with the ROB commit signals.
-      io.trace.insns(w).priv       := RegNext(Cat(RegNext(csr.io.status.debug), csr.io.status.prv))
+      io.trace(w).priv       := RegNext(csr.io.status.prv)
       // Can determine if it is an interrupt or not based on the MSB of the cause
-      io.trace.insns(w).exception  := RegNext(rob.io.com_xcpt.valid && !rob.io.com_xcpt.bits.cause(xLen - 1)) && (w == 0).B
-      io.trace.insns(w).interrupt  := RegNext(rob.io.com_xcpt.valid && rob.io.com_xcpt.bits.cause(xLen - 1)) && (w == 0).B
-      io.trace.insns(w).cause      := RegNext(rob.io.com_xcpt.bits.cause)
-      io.trace.insns(w).tval       := RegNext(csr.io.tval)
+      io.trace(w).exception  := RegNext(rob.io.com_xcpt.valid && !rob.io.com_xcpt.bits.cause(xLen - 1))
+      io.trace(w).interrupt  := RegNext(rob.io.com_xcpt.valid && rob.io.com_xcpt.bits.cause(xLen - 1))
+      io.trace(w).cause      := RegNext(rob.io.com_xcpt.bits.cause)
+      io.trace(w).tval       := RegNext(csr.io.tval)
     }
     dontTouch(io.trace)
   } else {
+    io.trace := DontCare
+    io.trace map (t => t.valid := false.B)
     io.ifu.debug_ftq_idx := DontCare
   }
 }

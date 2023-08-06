@@ -18,8 +18,10 @@ package boom.exu
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental.chiselName
 
-import org.chipsalliance.cde.config.Parameters
+import freechips.rocketchip.config.Parameters
+import freechips.rocketchip.rocket.ALU._
 import freechips.rocketchip.util._
 import freechips.rocketchip.tile
 import freechips.rocketchip.rocket.{PipelinedMultiplier,BP,BreakpointUnit,Causes,CSR}
@@ -111,6 +113,26 @@ class FuncUnitResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundl
   val sfence = Valid(new freechips.rocketchip.rocket.SFenceReq) // only for mcalc
 }
 
+//yh+begin
+class FuncUnitCapResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundle
+  with HasBoomUOP
+{
+	val tagged = Bool()
+	val dir = Bool()
+	val tag = UInt(tagWidth.W)
+  val caddr = UInt((vaddrBits+1).W) // only for caddr -> LSU
+  val taddr = UInt(32.W) // only for caddr -> LSU
+  val data = UInt(dataWidth.W)
+  val rs1_data = UInt(dataWidth.W)
+}
+
+class DptCSRs(implicit p: Parameters) extends BoomBundle
+{
+	val hbt_base = UInt((vaddrBits+1).W)
+	val num_ways = UInt(wayAddrSz.W)
+}
+//yh+end
+
 /**
  * Branch resolution information given from the branch unit
  */
@@ -161,6 +183,7 @@ abstract class FunctionalUnit(
   val isJmpUnit: Boolean = false,
   val isAluUnit: Boolean = false,
   val isMemAddrCalcUnit: Boolean = false,
+  val isCapAddrCalcUnit: Boolean = false, //yh+
   val needsFcsr: Boolean = false)
   (implicit p: Parameters) extends BoomModule
 {
@@ -185,6 +208,11 @@ abstract class FunctionalUnit(
     val mcontext = if (isMemAddrCalcUnit) Input(UInt(coreParams.mcontextWidth.W)) else null
     val scontext = if (isMemAddrCalcUnit) Input(UInt(coreParams.scontextWidth.W)) else null
 
+		//yh+begin
+		// only used by capaddr calc unit
+		val dpt_csrs = if (isCapAddrCalcUnit) Input(new DptCSRs()) else null
+    val cap_resp = if (isCapAddrCalcUnit) (new DecoupledIO(new FuncUnitCapResp(dataWidth))) else null
+		//yh+end
   })
 }
 
@@ -208,6 +236,7 @@ abstract class PipelinedFunctionalUnit(
   isJmpUnit: Boolean = false,
   isAluUnit: Boolean = false,
   isMemAddrCalcUnit: Boolean = false,
+  isCapAddrCalcUnit: Boolean = false, //yh+
   needsFcsr: Boolean = false
   )(implicit p: Parameters) extends FunctionalUnit(
     isPipelined = true,
@@ -217,6 +246,7 @@ abstract class PipelinedFunctionalUnit(
     isJmpUnit = isJmpUnit,
     isAluUnit = isAluUnit,
     isMemAddrCalcUnit = isMemAddrCalcUnit,
+    isCapAddrCalcUnit = isCapAddrCalcUnit, //yh+
     needsFcsr = needsFcsr)
 {
   // Pipelined functional unit is always ready.
@@ -277,6 +307,7 @@ abstract class PipelinedFunctionalUnit(
  * @param numStages how many pipeline stages does the functional unit have
  * @param dataWidth width of the data being operated on in the functional unit
  */
+@chiselName
 class ALUUnit(isJmpUnit: Boolean = false, numStages: Int = 1, dataWidth: Int)(implicit p: Parameters)
   extends PipelinedFunctionalUnit(
     numStages = numStages,
@@ -316,6 +347,8 @@ class ALUUnit(isJmpUnit: Boolean = false, numStages: Int = 1, dataWidth: Int)(im
 
   val alu = Module(new freechips.rocketchip.rocket.ALU())
 
+	alu.io.valid := io.req.valid //yh+
+	alu.io.is_sp := (io.req.bits.uop.lrs2 === SP) //yh+
   alu.io.in1 := op1_data.asUInt
   alu.io.in2 := op2_data.asUInt
   alu.io.fn  := uop.ctrl.op_fcn
@@ -481,8 +514,13 @@ class MemAddrCalcUnit(implicit p: Parameters)
 {
   // perform address calculation
   val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
-  val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
-                                       sum(63,vaddrBits) =/= 0.U)
+  //yh-val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
+  //yh-                                     sum(63,vaddrBits) =/= 0.U)
+  //yh+begin
+	assert (!(io.req.valid && io.req.bits.uop.cap_cmd =/= CAP_MEM))
+  val ea_sign = Mux(sum(vaddrBits-1), ~sum(xLen-tagWidth-1,vaddrBits) === 0.U,
+                                       sum(xLen-tagWidth-1,vaddrBits) =/= 0.U)
+	//yh+end
   val effective_address = Cat(ea_sign, sum(vaddrBits-1,0)).asUInt
 
   val store_data = io.req.bits.rs2_data
@@ -543,6 +581,61 @@ class MemAddrCalcUnit(implicit p: Parameters)
   io.resp.bits.sfence.bits.asid := io.req.bits.rs2_data
 }
 
+//yh+begin
+/**
+ * Functional unit that passes in base+imm to calculate capability addresses, and passes capability data
+ * to the LSU.
+ */
+class CapAddrCalcUnit(implicit p: Parameters)
+  extends PipelinedFunctionalUnit(
+    numStages = 0,
+    numBypassStages = 0,
+    earliestBypassStage = 0,
+    dataWidth = 65, // TODO enable this only if FP is enabled?
+    isCapAddrCalcUnit = true)
+  with freechips.rocketchip.rocket.constants.MemoryOpConstants
+  with freechips.rocketchip.rocket.constants.ScalarOpConstants
+{
+  // perform address calculation
+  val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
+
+	val tag = io.req.bits.rs1_data(xLen-1,xLen-tagWidth)
+	val tagged = (io.req.bits.rs1_data(xLen-tagWidth-1,vaddrBits+1) === 0.U && (tag =/= 0.U))
+	val is_cstr = io.req.bits.uop.cap_cmd === CAP_STR
+	val is_cclr = io.req.bits.uop.cap_cmd === CAP_CLR
+	val is_csrch = io.req.bits.uop.cap_cmd === CAP_SRC
+  //val caddr = (io.dpt_csrs.hbt_base + (tag << io.dpt_csrs.tag_offset))
+  val caddr = (io.dpt_csrs.hbt_base + ((tag * io.dpt_csrs.num_ways) << 3))
+  assert((xLen-tagWidth-1) > vaddrBits/2)
+
+  io.cap_resp.valid := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
+  io.cap_resp.bits.uop := io.req.bits.uop
+  io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
+	io.cap_resp.bits.tag := tag
+	io.cap_resp.bits.tagged := tagged
+	io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
+  io.cap_resp.bits.caddr := caddr
+	io.cap_resp.bits.taddr := Mux(io.req.bits.uop.cap_cmd =/= CAP_MEM, io.req.bits.rs1_data(31,0), sum(31,0))
+  io.cap_resp.bits.data := io.req.bits.rs2_data
+  io.cap_resp.bits.rs1_data := io.req.bits.rs1_data
+
+  when (io.req.valid) {
+    when (is_cstr) {
+      printf("Found CSTR base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+              io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    } .elsewhen (is_cclr) {
+      printf("Found CCLR base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+              io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    } .elsewhen (is_csrch) {
+      printf("Found CSRC base: %x tag: %x # ways: %x caddr: %x data: %x rs1_data: %x rs2_data: %x\n",
+              io.dpt_csrs.hbt_base, tag, io.dpt_csrs.num_ways, caddr,
+							io.req.bits.rs2_data, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    }
+  }
+}
+//yh+end
 
 /**
  * Functional unit to wrap lower level FPU
