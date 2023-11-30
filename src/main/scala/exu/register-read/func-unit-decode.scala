@@ -106,6 +106,12 @@ object AluRRdDecode extends RRdDecodeConstants
          BitPat(uopSRAW)  -> List(BR_N , Y, N, N, FN_SRA , DW_32 , OP1_RS1 , OP2_RS2 , IS_X, REN_1, CSR.N),
          BitPat(uopSRLW)  -> List(BR_N , Y, N, N, FN_SR  , DW_32 , OP1_RS1 , OP2_RS2 , IS_X, REN_1, CSR.N),
 
+				 //yh+begin
+         BitPat(uopTAGD)  -> List(BR_N , N, Y, N, FN_TAGD, DW_XPR, OP1_RS1 , OP2_RS2 , IS_X, REN_1, CSR.N),
+         BitPat(uopAUTD)  -> List(BR_N , N, Y, N, FN_TAGD, DW_XPR, OP1_RS1 , OP2_RS2 , IS_X, REN_1, CSR.N),
+         BitPat(uopXTAG)  -> List(BR_N , Y, N, N, FN_XTAG, DW_XPR, OP1_RS1 , OP2_X   , IS_X, REN_1, CSR.N),
+				 //yh+end
+
          BitPat(uopBEQ)   -> List(BR_EQ ,Y, N, N, FN_SUB , DW_XPR, OP1_X   , OP2_X   , IS_B, REN_0, CSR.N),
          BitPat(uopBNE)   -> List(BR_NE ,Y, N, N, FN_SUB , DW_XPR, OP1_X   , OP2_X   , IS_B, REN_0, CSR.N),
          BitPat(uopBGE)   -> List(BR_GE ,Y, N, N, FN_SLT , DW_XPR, OP1_X   , OP2_X   , IS_B, REN_0, CSR.N),
@@ -220,9 +226,9 @@ object FpuRRdDecode extends RRdDecodeConstants
          BitPat(uopFCLASS_S)->List(BR_N, Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
          BitPat(uopFCLASS_D)->List(BR_N, Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
 
-//         BitPat(uopFMV_W_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
+//         BitPat(uopFMV_S_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
 //         BitPat(uopFMV_D_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
-         BitPat(uopFMV_X_W)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
+         BitPat(uopFMV_X_S)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
          BitPat(uopFMV_X_D)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
          BitPat(uopFSGNJ_S)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
          BitPat(uopFSGNJ_D)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
@@ -273,7 +279,7 @@ object IfmvRRdDecode extends RRdDecodeConstants
                                // |      |  |  use mem pipe        |         |         |     rf wen |
                                // |      |  |  |  alu fcn  wd/word?|         |         |     |      |
                                // |      |  |  |  |        |       |         |         |     |      |
-         BitPat(uopFMV_W_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
+         BitPat(uopFMV_S_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
          BitPat(uopFMV_D_X)->List(BR_N , Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
 
          BitPat(uopFCVT_S_X) ->List(BR_N,Y, N, N, FN_X   , DW_X  , OP1_X   , OP2_X   , IS_X, REN_1, CSR.N),
@@ -341,6 +347,7 @@ class RegisterReadDecode(supportedUnits: SupportedFuncUnits)(implicit p: Paramet
   io.rrd_uop.ctrl.is_std  := io.rrd_uop.uopc === uopSTD || (io.rrd_uop.ctrl.is_sta && io.rrd_uop.lrs2_rtype === RT_FIX)
 
   when (io.rrd_uop.uopc === uopAMO_AG || (io.rrd_uop.uopc === uopLD && io.rrd_uop.mem_cmd === M_XLR)) {
+  //when (io.rrd_uop.is_cap || io.rrd_uop.uopc === uopAMO_AG || (io.rrd_uop.uopc === uopLD && io.rrd_uop.mem_cmd === M_XLR)) { //yh+
     io.rrd_uop.imm_packed := 0.U
   }
 

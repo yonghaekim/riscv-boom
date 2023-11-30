@@ -113,6 +113,39 @@ class FuncUnitResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundl
   val sfence = Valid(new freechips.rocketchip.rocket.SFenceReq) // only for mcalc
 }
 
+//yh+begin
+class FuncUnitCapResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBundle
+  with HasBoomUOP
+{
+	val tag = UInt(tagWidth.W)
+	val tagged = Bool()
+	//val dir = Bool()
+  val addr = UInt((vaddrBits+1).W)
+  val data = UInt(vaddrBits.W)
+  val cmt_addr = UInt(vaddrBits.W)
+  val num_ways = UInt(wayAddrSz.W)
+}
+
+class DptCSRs(implicit p: Parameters) extends BoomBundle
+{
+	val arena_end_0 = UInt(xLen.W)
+	val arena_end_1 = UInt(xLen.W)
+	val arena_end_2 = UInt(xLen.W)
+	val arena_end_3 = UInt(xLen.W)
+	val arena_end_4 = UInt(xLen.W)
+	val arena_end_5 = UInt(xLen.W)
+	val arena_end_6 = UInt(xLen.W)
+	val arena_end_7 = UInt(xLen.W)
+  val num_ways_0 = UInt(xLen.W)
+  val num_ways_1 = UInt(xLen.W)
+  val num_ways_2 = UInt(xLen.W)
+  val num_ways_3 = UInt(xLen.W)
+  val cmt_base = UInt(vaddrBits.W)
+  val cmt_size_offset = UInt(8.W)
+	val wpb_base = UInt(vaddrBits.W)
+}
+//yh+end
+
 /**
  * Branch resolution information given from the branch unit
  */
@@ -163,6 +196,7 @@ abstract class FunctionalUnit(
   val isJmpUnit: Boolean = false,
   val isAluUnit: Boolean = false,
   val isMemAddrCalcUnit: Boolean = false,
+  val isCapAddrCalcUnit: Boolean = false, //yh+
   val needsFcsr: Boolean = false)
   (implicit p: Parameters) extends BoomModule
 {
@@ -187,6 +221,11 @@ abstract class FunctionalUnit(
     val mcontext = if (isMemAddrCalcUnit) Input(UInt(coreParams.mcontextWidth.W)) else null
     val scontext = if (isMemAddrCalcUnit) Input(UInt(coreParams.scontextWidth.W)) else null
 
+		//yh+begin
+		// only used by capaddr calc unit
+    val cap_resp = if (isCapAddrCalcUnit) (new DecoupledIO(new FuncUnitCapResp(dataWidth))) else null
+		val dpt_csrs = if (isMemAddrCalcUnit || isCapAddrCalcUnit) Input(new DptCSRs()) else null
+		//yh+end
   })
 }
 
@@ -210,6 +249,7 @@ abstract class PipelinedFunctionalUnit(
   isJmpUnit: Boolean = false,
   isAluUnit: Boolean = false,
   isMemAddrCalcUnit: Boolean = false,
+  isCapAddrCalcUnit: Boolean = false, //yh+
   needsFcsr: Boolean = false
   )(implicit p: Parameters) extends FunctionalUnit(
     isPipelined = true,
@@ -219,6 +259,7 @@ abstract class PipelinedFunctionalUnit(
     isJmpUnit = isJmpUnit,
     isAluUnit = isAluUnit,
     isMemAddrCalcUnit = isMemAddrCalcUnit,
+    isCapAddrCalcUnit = isCapAddrCalcUnit, //yh+
     needsFcsr = needsFcsr)
 {
   // Pipelined functional unit is always ready.
@@ -484,11 +525,33 @@ class MemAddrCalcUnit(implicit p: Parameters)
 {
   // perform address calculation
   val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
-  val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
-                                       sum(63,vaddrBits) =/= 0.U)
-  val effective_address = Cat(ea_sign, sum(vaddrBits-1,0)).asUInt
+  //yh-val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
+  //yh-                                     sum(63,vaddrBits) =/= 0.U)
+  //yh+begin
+	assert (!(io.req.valid && io.req.bits.uop.is_cap))
+  val ea_sign = Mux(sum(vaddrBits-1), ~sum(xLen-tagWidth-1,vaddrBits) === 0.U,
+                                       sum(xLen-tagWidth-1,vaddrBits) =/= 0.U)
+	//yh+end
+  //yh-val effective_address = Cat(ea_sign, sum(vaddrBits-1,0)).asUInt
 
-  val store_data = io.req.bits.rs2_data
+  //yh-val store_data = io.req.bits.rs2_data
+  //yh+begin
+  val effective_address = Mux(io.req.bits.uop.is_bmm,
+                              io.dpt_csrs.wpb_base + (io.req.bits.rs1_data(vaddrBits-1,6) << 0),
+                              Cat(ea_sign, sum(vaddrBits-1,0)).asUInt)
+
+  val store_data = Mux(io.req.bits.uop.is_bmm,
+                      Mux(io.req.bits.uop.mem_cmd === M_XA_AND /* BCLRM */,
+                      ~(1.U << io.req.bits.rs2_data(5,0)),
+                      (1.U << io.req.bits.rs2_data(5,0))),
+                      io.req.bits.rs2_data)
+
+  when (io.req.valid && io.req.bits.uop.is_bmm) {
+    printf("rs1_data: %x effective_addr: %x rs2_data: %x store_data: %x wbp_base: %x\n",
+            io.req.bits.rs1_data, effective_address, 
+						io.req.bits.rs2_data, store_data, io.dpt_csrs.wpb_base)
+  }
+  //yh+end
 
   io.resp.bits.addr := effective_address
   io.resp.bits.data := store_data
@@ -546,6 +609,132 @@ class MemAddrCalcUnit(implicit p: Parameters)
   io.resp.bits.sfence.bits.asid := io.req.bits.rs2_data
 }
 
+//yh+begin
+/**
+ * Functional unit that passes in base+imm to calculate capability addresses, and passes capability data
+ * to the LSU.
+ */
+class CapAddrCalcUnit(implicit p: Parameters)
+  extends PipelinedFunctionalUnit(
+    numStages = 0,
+    numBypassStages = 0,
+    earliestBypassStage = 0,
+    dataWidth = 65, // TODO enable this only if FP is enabled?
+    isCapAddrCalcUnit = true)
+  with freechips.rocketchip.rocket.constants.MemoryOpConstants
+  with freechips.rocketchip.rocket.constants.ScalarOpConstants
+{
+  // perform address calculation
+  val sum = (io.req.bits.rs1_data.asSInt + io.req.bits.uop.imm_packed(19,8).asSInt).asUInt
+
+	val tag = io.req.bits.rs1_data(xLen-1,xLen-tagWidth)
+	val tagged = (io.req.bits.rs1_data(xLen-tagWidth-1,vaddrBits+1) === 0.U && tag =/= 0.U)
+	val is_cstr = (io.req.bits.uop.cap_cmd === CAP_CS)
+	val is_cclr = (io.req.bits.uop.cap_cmd === CAP_CC)
+  val addr = Mux(io.req.bits.uop.cap_cmd(1) /* cstr, cclr */,
+                  io.req.bits.rs1_data(xLen-1,0), sum(xLen-1,0))
+  assert((xLen-tagWidth-1) > vaddrBits/2)
+
+  val arena_end = Wire(Vec(31, UInt(16.W)))
+  val num_ways = Wire(Vec(32, UInt(8.W)))
+  val offset = Wire(Vec(32, UInt(vaddrBits.W)))
+
+  for (i <- 0 until 4) {
+    arena_end(i+ 0) := io.dpt_csrs.arena_end_0(16*(i+1)-1,16*i) 
+    arena_end(i+ 4) := io.dpt_csrs.arena_end_1(16*(i+1)-1,16*i) 
+    arena_end(i+ 8) := io.dpt_csrs.arena_end_2(16*(i+1)-1,16*i) 
+    arena_end(i+12) := io.dpt_csrs.arena_end_3(16*(i+1)-1,16*i) 
+    arena_end(i+16) := io.dpt_csrs.arena_end_4(16*(i+1)-1,16*i) 
+    arena_end(i+20) := io.dpt_csrs.arena_end_5(16*(i+1)-1,16*i) 
+    arena_end(i+24) := io.dpt_csrs.arena_end_6(16*(i+1)-1,16*i) 
+  }
+  arena_end(28) := io.dpt_csrs.arena_end_7(16*(0+1)-1,16*0) 
+  arena_end(29) := io.dpt_csrs.arena_end_7(16*(1+1)-1,16*1) 
+  arena_end(30) := io.dpt_csrs.arena_end_7(16*(2+1)-1,16*2) 
+
+  for (i <- 0 until 8) {
+    num_ways(i+ 0) := io.dpt_csrs.num_ways_0(8*(i+1)-1, 8*i)
+    num_ways(i+ 8) := io.dpt_csrs.num_ways_1(8*(i+1)-1, 8*i)
+    num_ways(i+16) := io.dpt_csrs.num_ways_2(8*(i+1)-1, 8*i)
+    num_ways(i+24) := io.dpt_csrs.num_ways_3(8*(i+1)-1, 8*i)
+  }
+
+  val cmt_size_offset = Reg(Vec(32, UInt(vaddrBits.W)))
+  for (i <- 0 until 32) {
+    cmt_size_offset(i) := (io.dpt_csrs.cmt_size_offset << 25) * i.asUInt
+  }
+
+  //for (i <- 0 until 32) {
+  //  //offset(i) := ((1.U << 25) * i.asUInt)
+  //  offset(i) := (cmt_size * i.asUInt)
+  //}
+
+  val sel_vec = Wire(Vec(32, Bool()))
+
+  for (i <- 0 until 31) {
+    sel_vec(i) := Mux(addr(38,23) < arena_end(i)(15,0), true.B, false.B)
+  }
+  sel_vec(31) := true.B
+
+  val idx = PriorityEncoder(RegNext(sel_vec))
+
+  val cap_resp_val = Reg(Bool())
+  val cap_resp = Reg(new FuncUnitCapResp(dataWidth))
+  cap_resp_val := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
+  cap_resp.uop := io.req.bits.uop
+  cap_resp.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
+	cap_resp.tag := tag
+	cap_resp.tagged := tagged
+	//TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
+	//cap_resp.dir := true.B
+	cap_resp.addr := addr
+  cap_resp.data := io.req.bits.rs2_data(vaddrBits-1,0)
+  //val cmt_addr = (io.dpt_csrs.cmt_base + offset(idx) + (cap_resp.tag << 9))
+  val cmt_addr = (io.dpt_csrs.cmt_base + cmt_size_offset(idx) + (cap_resp.tag << 9))
+
+  io.cap_resp.valid := (cap_resp_val & !IsKilledByBranch(io.brupdate, cap_resp.uop))
+  io.cap_resp.bits.uop := cap_resp.uop
+  io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, cap_resp.uop)
+	io.cap_resp.bits.tag := cap_resp.tag
+	io.cap_resp.bits.tagged := cap_resp.tagged
+	//TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
+	//io.cap_resp.bits.dir := true.B
+	io.cap_resp.bits.addr := cap_resp.addr
+  io.cap_resp.bits.data := cap_resp.data
+	io.cap_resp.bits.cmt_addr := cmt_addr
+	io.cap_resp.bits.num_ways := num_ways(idx)
+
+  //io.cap_resp.valid := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
+  //io.cap_resp.bits.uop := io.req.bits.uop
+  //io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
+	//io.cap_resp.bits.tag := tag
+	//io.cap_resp.bits.tagged := tagged
+	////TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
+	//io.cap_resp.bits.dir := true.B
+	//io.cap_resp.bits.addr := addr
+  //io.cap_resp.bits.data := io.req.bits.rs2_data(vaddrBits-1,0)
+
+  when (io.req.valid) {
+    when (is_cstr) {
+      printf("Found CSTR tag: %x addr: %x rs1_data: %x rs2_data: %x\n",
+              tag, addr, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    } .elsewhen (is_cclr) {
+      printf("Found CCLR tag: %x addr: %x rs1_data: %x rs2_data: %x\n",
+              tag, addr, io.req.bits.rs1_data, io.req.bits.rs2_data)
+    }
+
+    for (i <- 0 until 4) { printf("arena_end(%d): %x ", i.asUInt, arena_end(i)) }
+    printf("\n")
+    for (i <- 0 until 4) { printf("num_ways(%d): %d ", i.asUInt, num_ways(i)) }
+    printf("\n")
+  }
+
+  when (cap_resp_val) {
+    printf("cmt_base: %x tag: %x addr: %x idx: %d cmt_addr: %x num_ways: %d\n", 
+            io.dpt_csrs.cmt_base, cap_resp.tag, cap_resp.addr, idx.asUInt, cmt_addr, num_ways(idx))
+  }
+}
+//yh+end
 
 /**
  * Functional unit to wrap lower level FPU
