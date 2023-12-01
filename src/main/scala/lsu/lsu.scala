@@ -53,6 +53,7 @@ import freechips.rocketchip.util.Str
 
 import boom.common._
 import boom.exu.{BrUpdateInfo, Exception, FuncUnitResp, CommitSignals, ExeUnitResp}
+import boom.exu.FuncUnitCapResp //yh+
 import boom.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
 
 class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
@@ -64,6 +65,14 @@ class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
   val fresp    = new DecoupledIO(new boom.exu.ExeUnitResp(xLen+1)) // TODO: Should this be fLen?
 }
 
+//yh+begin
+class LSUCapExeIO(implicit p: Parameters) extends BoomBundle()(p)
+{
+  // The "resp" of the caddrcalc is really a "cap_req" to the LSU
+  val cap_req		= Flipped(new ValidIO(new FuncUnitCapResp(xLen)))
+}
+//yh+end
+
 class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   with HasBoomUOP
 {
@@ -74,10 +83,21 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
 
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
   with HasBoomUOP
+	with rocket.HasL1HellaCacheParameters //yh+
 {
   val data = Bits(coreDataBits.W)
+  val dataBeats = Bits(encRowBits.W) //yh+
   val is_hella = Bool()
 }
+
+//yh+begin
+class BoomCapltyResp(implicit p: Parameters) extends BoomBundle()(p)
+  with HasBoomUOP
+	with rocket.HasL1HellaCacheParameters
+{
+  val data = Bits(encRowBits.W)
+}
+//yh+end
 
 class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
 {
@@ -89,6 +109,10 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val resp        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheResp)))
   // In our response stage, if we get a nack, we need to reexecute
   val nack        = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
+	//yh+begin
+  val cap_resp = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheResp)))
+  val cap_nack = Flipped(Vec(memWidth, new ValidIO(new BoomDCacheReq)))
+	//yh+end
 
   val brupdate       = Output(new BrUpdateInfo)
   val exception    = Output(Bool())
@@ -111,6 +135,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
 class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
 {
   val exe = Vec(memWidth, new LSUExeIO)
+  val cap_exe = Vec(memWidth, new LSUCapExeIO) //yh+
 
   val dis_uops    = Flipped(Vec(coreWidth, Valid(new MicroOp)))
   val dis_ldq_idx = Output(Vec(coreWidth, UInt(ldqAddrSz.W)))
@@ -127,6 +152,11 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   // Stores clear busy bit when stdata is received
   // memWidth for int, 1 for fp (to avoid back-pressure fpstdat)
   val clr_bsy         = Output(Vec(memWidth + 1, Valid(UInt(robAddrSz.W))))
+
+	//yh+begin
+  // Stores clear needCC bit when capability check is done
+  val clr_needCC      = Output(Vec(memWidth + memWidth, Valid(UInt(robAddrSz.W))))
+	//yh+end
 
   // Speculatively safe load (barring memory ordering failure)
   val clr_unsafe      = Output(Vec(memWidth, Valid(UInt(robAddrSz.W))))
@@ -145,6 +175,11 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
   val exception    = Input(Bool())
 
   val fencei_rdy  = Output(Bool())
+	//yh+begin
+	val slq_nonempty = Output(Bool())
+	val ssq_nonempty = Output(Bool())
+	val scq_nonempty = Output(Bool())
+	//yh+end
 
   val lxcpt       = Output(Valid(new Exception))
 
@@ -155,6 +190,31 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
     val release = Bool()
     val tlbMiss = Bool()
   })
+
+  //yh+begin
+  val dis_slq_idx = Output(Vec(coreWidth, UInt(slqAddrSz.W)))
+  val dis_ssq_idx = Output(Vec(coreWidth, UInt(ssqAddrSz.W)))
+  val dis_scq_idx = Output(Vec(coreWidth, UInt(scqAddrSz.W)))
+
+  val slq_full    = Output(Vec(coreWidth, Bool()))
+  val ssq_full    = Output(Vec(coreWidth, Bool()))
+  val scq_full    = Output(Vec(coreWidth, Bool()))
+
+  val dpt_csrs            = Input(new LSUDptCSRs)
+  val num_store    				= Output(UInt(xLen.W))
+  val num_load    				= Output(UInt(xLen.W))
+  val num_tagged_store    = Output(UInt(xLen.W))
+  val num_tagged_load     = Output(UInt(xLen.W))
+	val ldst_traffic			  = Output(UInt(xLen.W))
+	val bounds_traffic		  = Output(UInt(xLen.W))
+  val num_store_hit       = Output(UInt(xLen.W))
+  val num_load_hit        = Output(UInt(xLen.W))
+  val num_cstr            = Output(UInt(xLen.W))
+  val num_cclr            = Output(UInt(xLen.W))
+  val num_slq_itr         = Output(UInt(xLen.W))
+  val num_ssq_itr         = Output(UInt(xLen.W))
+  val num_scq_itr         = Output(UInt(xLen.W))
+  //yh+end
 }
 
 class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
@@ -200,6 +260,83 @@ class STQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val debug_wb_data       = UInt(xLen.W)
 }
 
+//yh+begin
+class SLQEntry(implicit p: Parameters) extends BoomBundle()(p)
+    with HasBoomUOP
+{
+	val tag									= UInt(tagWidth.W)
+	val cmt_addr						= UInt(vaddrBits.W)
+	val num_ways						= UInt(wayAddrSz.W)
+	val addr								= UInt((vaddrBits+1).W)
+	val way									= UInt(wayAddrSz.W)
+	val count								= UInt(wayAddrSz.W)
+	val state								= UInt(3.W)
+	val tagged						  = Bool()
+  val tag_dep_mask        = UInt(numScqEntries.W)
+	//val dir									= Bool() // 1: forward, 0: backward
+  val ccache_hit          = Bool()
+  val is_rob_head         = Bool()
+}
+
+class SSQEntry(implicit p: Parameters) extends BoomBundle()(p)
+    with HasBoomUOP
+{
+	val tag									= UInt(tagWidth.W)
+	val cmt_addr						= UInt(vaddrBits.W)
+	val num_ways						= UInt(wayAddrSz.W)
+	val addr								= UInt((vaddrBits+1).W)
+	val way									= UInt(wayAddrSz.W)
+	val count								= UInt(wayAddrSz.W)
+	val state								= UInt(3.W)
+	val tagged						  = Bool()
+  val tag_dep_mask        = UInt(numScqEntries.W)
+	//val dir									= Bool() // 1: forward, 0: backward
+  val ccache_hit          = Bool()
+  val is_rob_head         = Bool()
+}
+
+class SCQEntry(implicit p: Parameters) extends BoomBundle()(p)
+   with HasBoomUOP
+{
+	val tag									= UInt(tagWidth.W)
+	val cmt_addr						= UInt(vaddrBits.W)
+	val num_ways						= UInt(wayAddrSz.W)
+	val addr								= UInt((vaddrBits+1).W)
+  val data                = Valid(UInt(vaddrBits.W))
+	val way									= UInt(wayAddrSz.W)
+	val count								= UInt(wayAddrSz.W)
+	val state								= UInt(3.W)
+	val tagged						  = Bool()
+	//val dir									= Bool() // 1: forward, 0: backward
+  val ccache_hit          = Bool()
+  val is_rob_head         = Bool()
+}
+
+class LSUDptCSRs(implicit p: Parameters) extends BoomBundle()(p)
+{
+  val enableDPT           = Bool()
+  val enableStat          = Bool()
+  val disableSpec         = Bool()
+  val suppressFault       = Bool()
+  val ignoreDepMask				= Bool()
+  val cmt_base            = UInt(coreMaxAddrBits.W)
+  val num_store    				= UInt(xLen.W)
+  val num_load    				= UInt(xLen.W)
+  val num_tagged_store    = UInt(xLen.W)
+  val num_tagged_load     = UInt(xLen.W)
+  val ldst_traffic        = UInt(xLen.W)
+  val bounds_traffic      = UInt(xLen.W)
+  val num_store_hit       = UInt(xLen.W)
+  val num_load_hit        = UInt(xLen.W)
+  val num_cstr            = UInt(xLen.W)
+  val num_cclr            = UInt(xLen.W)
+	val num_slq_itr					= UInt(xLen.W)
+	val num_ssq_itr					= UInt(xLen.W)
+	val num_scq_itr					= UInt(xLen.W)
+  val bounds_margin       = UInt(xLen.W)
+}
+//yh+end
+
 class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   with rocket.HasL1HellaCacheParameters
 {
@@ -209,8 +346,6 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val ldq = Reg(Vec(numLdqEntries, Valid(new LDQEntry)))
   val stq = Reg(Vec(numStqEntries, Valid(new STQEntry)))
 
-
-
   val ldq_head         = Reg(UInt(ldqAddrSz.W))
   val ldq_tail         = Reg(UInt(ldqAddrSz.W))
   val stq_head         = Reg(UInt(stqAddrSz.W)) // point to next store to clear from STQ (i.e., send to memory)
@@ -218,6 +353,33 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val stq_commit_head  = Reg(UInt(stqAddrSz.W)) // point to next store to commit
   val stq_execute_head = Reg(UInt(stqAddrSz.W)) // point to next store to execute
 
+  //yh+begin
+  val slq = Reg(Vec(numSlqEntries, Valid(new SLQEntry)))
+  val ssq = Reg(Vec(numSsqEntries, Valid(new SSQEntry)))
+  val scq = Reg(Vec(numScqEntries, Valid(new SCQEntry)))
+
+  val slq_head         = Reg(UInt(slqAddrSz.W))
+  val slq_tail         = Reg(UInt(slqAddrSz.W))
+  val ssq_head         = Reg(UInt(ssqAddrSz.W))
+  val ssq_tail         = Reg(UInt(ssqAddrSz.W))
+  val scq_head         = Reg(UInt(scqAddrSz.W))
+  val scq_tail         = Reg(UInt(scqAddrSz.W))
+
+  val s_init :: s_update :: s_fire :: s_wait :: s_fire2 :: s_wait2 :: s_fail :: s_done :: Nil = Enum(8)
+
+	//def WrapIncOrDecWay(dir: Bool, cur_way: UInt, num_ways: UInt): UInt = {
+	//	Mux(dir, Mux(cur_way === (num_ways - 1.U), 0.U, cur_way + 1.U),
+	//			Mux(cur_way === 0.U, num_ways - 1.U, cur_way - 1.U))
+	//}
+
+	def WrapIncWay(cur_way: UInt, num_ways: UInt): UInt = {
+		Mux(cur_way === (num_ways - 1.U), 0.U, cur_way + 1.U)
+	}
+
+	//def WrapDecWay(cur_way: UInt, size: UInt, num_ways: UInt): UInt = {
+	//	Mux(cur_way === 0.U, num_ways - size, cur_way - size)
+	//}
+  //yh+end
 
   // If we got a mispredict, the tail will be misaligned for 1 extra cycle
   assert (io.core.brupdate.b2.mispredict ||
@@ -260,6 +422,112 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   var next_live_store_mask = Mux(clear_store, live_store_mask & ~(1.U << stq_head),
                                               live_store_mask)
 
+  //yh+begin
+  val enableDPT        		= RegInit(false.B)
+  val initDPT           	= Reg(Bool())
+  val enableStat       		= RegInit(false.B)
+  val disableSpec       	= Reg(Bool())
+  val suppressFault       = Reg(Bool())
+  val ignoreDepMask      	= Reg(Bool())
+  val initStat          	= Reg(Bool())
+  val cmt_base            = Reg(UInt(coreMaxAddrBits.W))
+
+  val num_store    				= Reg(UInt(xLen.W))
+  val num_load    				= Reg(UInt(xLen.W))
+  val num_tagged_store    = Reg(UInt(xLen.W))
+  val num_tagged_load     = Reg(UInt(xLen.W))
+  val ldst_traffic        = Reg(UInt(xLen.W))
+  val bounds_traffic      = Reg(UInt(xLen.W))
+  val num_store_hit       = Reg(UInt(xLen.W))
+  val num_load_hit        = Reg(UInt(xLen.W))
+  val num_cstr            = Reg(UInt(xLen.W))
+  val num_cclr            = Reg(UInt(xLen.W))
+  val num_slq_itr         = Reg(UInt(xLen.W))
+  val num_ssq_itr         = Reg(UInt(xLen.W))
+  val num_scq_itr         = Reg(UInt(xLen.W))
+
+  val bounds_margin       = Reg(UInt(vaddrBits.W))
+  
+  enableDPT              	:= io.core.dpt_csrs.enableDPT
+  initDPT                	:= io.core.dpt_csrs.enableDPT & !enableDPT
+  enableStat             	:= io.core.dpt_csrs.enableStat
+  initStat               	:= io.core.dpt_csrs.enableStat & !enableStat
+  disableSpec             := io.core.dpt_csrs.disableSpec
+  suppressFault           := io.core.dpt_csrs.suppressFault
+  ignoreDepMask           := io.core.dpt_csrs.ignoreDepMask
+  cmt_base                := io.core.dpt_csrs.cmt_base(coreMaxAddrBits-1,0)
+  bounds_margin          	:= ~(io.core.dpt_csrs.bounds_margin(vaddrBits-1,0))
+
+  io.core.num_store  					:= num_store
+  io.core.num_load  					:= num_load
+  io.core.num_tagged_store  	:= num_tagged_store
+  io.core.num_tagged_load   	:= num_tagged_load
+  io.core.ldst_traffic      	:= ldst_traffic
+  io.core.bounds_traffic    	:= bounds_traffic
+  io.core.num_store_hit       := num_store_hit
+  io.core.num_load_hit        := num_load_hit
+  io.core.num_cstr            := num_cstr
+  io.core.num_cclr            := num_cclr
+  io.core.num_slq_itr         := num_slq_itr
+  io.core.num_ssq_itr         := num_ssq_itr
+  io.core.num_scq_itr         := num_scq_itr
+
+  //val clear_capst = WireInit(false.B) // cstr, cclr
+  val live_tag_mask = RegInit(0.U(numScqEntries.W))
+  val zero_tag_mask = RegInit(0.U(numScqEntries.W))
+	zero_tag_mask := 0.U
+	var new_tag_mask = zero_tag_mask
+  var next_live_tag_mask = live_tag_mask
+  //var next_live_tag_mask = Mux(clear_capst, live_tag_mask & ~(1.U << scq_head),
+  //                                          live_tag_mask)
+
+  var temp_scq_head = scq_head
+  var temp_num_cstr = num_cstr
+  var temp_num_cclr = num_cclr
+  var temp_num_scq_itr = num_scq_itr
+
+	printf("[%d] num_slq_itr: %d num_ssq_itr: %d num_scq_itr: %d\n",
+					io.core.tsc_reg, num_slq_itr, num_ssq_itr, num_scq_itr)
+
+  for (w <- 0 until coreWidth)
+  {
+    val commit_capst = (io.core.commit.valids(w) && io.core.commit.uops(w).uses_stq &&
+                        io.core.commit.uops(w).is_cap)
+
+		when (commit_capst) {
+      assert (scq(temp_scq_head).valid, "[lsu] trying to commit an un-allocated SCQ entry.")
+      assert (scq(temp_scq_head).bits.state === s_done,
+							"[lsu] trying to commit an un-executed SCQ entry.")
+
+      scq(temp_scq_head).valid      := false.B
+      scq(temp_scq_head).bits.state	:= s_init
+      printf("[%d] Commit scq(%d) num_ways: %d count: %d\n",
+							io.core.tsc_reg, temp_scq_head, scq(temp_scq_head).bits.num_ways, scq(temp_scq_head).bits.count)
+		}
+
+		temp_num_cstr = Mux(enableStat & commit_capst & scq(temp_scq_head).bits.uop.cap_cmd === CAP_CS,
+												temp_num_cstr + 1.U, temp_num_cstr)
+		temp_num_cclr = Mux(enableStat & commit_capst & scq(temp_scq_head).bits.uop.cap_cmd === CAP_CC,
+												temp_num_cclr + 1.U, temp_num_cclr)
+		temp_num_scq_itr = Mux(enableStat & commit_capst,
+												temp_num_scq_itr + (scq(temp_scq_head).bits.num_ways - scq(temp_scq_head).bits.count),
+												temp_num_scq_itr)
+
+  	next_live_tag_mask = Mux(commit_capst, next_live_tag_mask & ~(1.U << temp_scq_head),
+                                          next_live_tag_mask)
+		new_tag_mask = Mux(commit_capst, new_tag_mask | (1.U << temp_scq_head), new_tag_mask)
+    temp_scq_head = Mux(commit_capst, WrapInc(temp_scq_head, numScqEntries), temp_scq_head)
+
+		when (commit_capst) {
+			printf("[%d] new_tag_mask: %x next_live_tag_mask: %x\n", io.core.tsc_reg, new_tag_mask, next_live_tag_mask)
+		}
+	}
+
+	scq_head := temp_scq_head
+  num_cstr := Mux(initStat, io.core.dpt_csrs.num_cstr, temp_num_cstr)
+  num_cclr := Mux(initStat, io.core.dpt_csrs.num_cclr, temp_num_cclr)
+  num_scq_itr := Mux(initStat, io.core.dpt_csrs.num_scq_itr, temp_num_scq_itr)
+  //yh+end
 
   def widthMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
 
@@ -278,6 +546,30 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(i).bits.st_dep_mask := ldq(i).bits.st_dep_mask & ~(1.U << stq_head)
     }
   }
+
+  //yh+begin
+  for (i <- 0 until numSlqEntries) {
+    //when (clear_capst) {
+      slq(i).bits.tag_dep_mask := (slq(i).bits.tag_dep_mask & ~new_tag_mask)
+    //}
+		when (new_tag_mask =/= 0.U) {
+			printf("[%d] Update tag mask slq(%d) (%x->%x) new_tag_mask: %x\n",
+							io.core.tsc_reg, i.U, slq(i).bits.tag_dep_mask,
+							slq(i).bits.tag_dep_mask & ~new_tag_mask, new_tag_mask)
+		}
+  }
+
+  for (i <- 0 until numSsqEntries) {
+    //when (clear_capst) {
+      ssq(i).bits.tag_dep_mask := (ssq(i).bits.tag_dep_mask & ~new_tag_mask)
+    //}
+		when (new_tag_mask =/= 0.U) {
+			printf("[%d] Update tag mask ssq(%d) (%x->%x) new_tag_mask: %x\n",
+							io.core.tsc_reg, i.U, ssq(i).bits.tag_dep_mask,
+							ssq(i).bits.tag_dep_mask & ~new_tag_mask, new_tag_mask)
+		}
+  }
+  //yh+end
 
   // Decode stage
   var ld_enq_idx = ldq_tail
@@ -299,7 +591,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     io.core.dis_stq_idx(w) := st_enq_idx
 
     val dis_ld_val = io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_ldq && !io.core.dis_uops(w).bits.exception
-    val dis_st_val = io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_stq && !io.core.dis_uops(w).bits.exception
+    //yh-val dis_st_val = io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_stq && !io.core.dis_uops(w).bits.exception
+		//yh+begin
+    val dis_st_val = (io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_stq &&
+                      !io.core.dis_uops(w).bits.is_cap && !io.core.dis_uops(w).bits.exception)
+		//yh+end
     when (dis_ld_val)
     {
       ldq(ld_enq_idx).valid                := true.B
@@ -344,8 +640,120 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   ldq_tail := ld_enq_idx
   stq_tail := st_enq_idx
 
+  //yh+begin
+  var sl_enq_idx = slq_tail
+  var ss_enq_idx = ssq_tail
+  var sc_enq_idx = scq_tail
+
+  val slq_nonempty = (0 until numSlqEntries).map{ i => slq(i).valid }.reduce(_||_) =/= 0.U
+  val ssq_nonempty = (0 until numSsqEntries).map{ i => ssq(i).valid }.reduce(_||_) =/= 0.U
+  val scq_nonempty = (0 until numScqEntries).map{ i => scq(i).valid }.reduce(_||_) =/= 0.U
+
+  var slq_full = Bool()
+  var ssq_full = Bool()
+  var scq_full = Bool()
+
+  for (w <- 0 until coreWidth)
+  {
+    slq_full = WrapInc(sl_enq_idx, numSlqEntries) === slq_head
+    io.core.slq_full(w)    := slq_full
+    io.core.dis_slq_idx(w) := sl_enq_idx
+
+    ssq_full = WrapInc(ss_enq_idx, numSsqEntries) === ssq_head
+    io.core.ssq_full(w)    := ssq_full
+    io.core.dis_ssq_idx(w) := ss_enq_idx
+
+    scq_full = WrapInc(sc_enq_idx, numScqEntries) === scq_head
+    io.core.scq_full(w)    := scq_full
+    io.core.dis_scq_idx(w) := sc_enq_idx
+
+    val dis_sl_val = (io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_ldq &&
+                        io.core.dis_uops(w).bits.needCC && !io.core.dis_uops(w).bits.exception)
+    val dis_ss_val = (io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_stq &&
+                        io.core.dis_uops(w).bits.needCC && !io.core.dis_uops(w).bits.is_cap &&
+												!io.core.dis_uops(w).bits.exception)
+    val dis_sc_val = (io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.is_cap /* cstr, cclr */ &&
+                        !io.core.dis_uops(w).bits.exception)
+
+    when (dis_sl_val)
+    {
+      slq(sl_enq_idx).valid               := true.B
+      slq(sl_enq_idx).bits.uop            := io.core.dis_uops(w).bits
+      slq(sl_enq_idx).bits.uop.uses_ldq   := true.B
+      slq(sl_enq_idx).bits.uop.uses_stq   := false.B
+      slq(sl_enq_idx).bits.uop.is_cap     := true.B
+      slq(sl_enq_idx).bits.uop.mem_size   := 3.U
+      slq(sl_enq_idx).bits.uop.mem_cmd    := rocket.M_XRD
+      slq(sl_enq_idx).bits.state        	:= s_init
+      slq(sl_enq_idx).bits.tagged         := false.B
+      slq(sl_enq_idx).bits.tag_dep_mask   := next_live_tag_mask
+      slq(sl_enq_idx).bits.ccache_hit     := false.B
+      slq(sl_enq_idx).bits.is_rob_head    := false.B
+
+      printf("[%d] Dispatch slq(%d) tag_mask: %x ldq(%d) rob(%d)\n",
+							io.core.tsc_reg, sl_enq_idx, next_live_tag_mask,
+							io.core.dis_uops(w).bits.ldq_idx, io.core.dis_uops(w).bits.rob_idx)
+    }
+      .elsewhen (dis_ss_val)
+    {
+      ssq(ss_enq_idx).valid             	:= true.B
+      ssq(ss_enq_idx).bits.uop            := io.core.dis_uops(w).bits
+      ssq(ss_enq_idx).bits.uop.uses_ldq   := true.B
+      ssq(ss_enq_idx).bits.uop.uses_stq   := false.B
+      ssq(ss_enq_idx).bits.uop.is_cap     := true.B
+      ssq(ss_enq_idx).bits.uop.mem_size   := 3.U
+      ssq(ss_enq_idx).bits.uop.mem_cmd    := rocket.M_XRD
+      ssq(ss_enq_idx).bits.state          := s_init
+      ssq(ss_enq_idx).bits.tagged         := false.B
+      ssq(ss_enq_idx).bits.tag_dep_mask   := next_live_tag_mask
+      ssq(ss_enq_idx).bits.ccache_hit     := false.B
+      ssq(ss_enq_idx).bits.is_rob_head    := false.B
+
+      printf("[%d] Dispatch ssq(%d) tag_mask: %x stq(%d) rob(%d)\n",
+							io.core.tsc_reg, ss_enq_idx, next_live_tag_mask, io.core.dis_uops(w).bits.stq_idx,
+							io.core.dis_uops(w).bits.rob_idx)
+    }
+      .elsewhen (dis_sc_val)
+    {
+      scq(sc_enq_idx).valid             	:= true.B
+      scq(sc_enq_idx).bits.uop            := io.core.dis_uops(w).bits
+      scq(sc_enq_idx).bits.uop.is_cap     := true.B
+      scq(sc_enq_idx).bits.uop.mem_size   := 3.U
+      scq(sc_enq_idx).bits.data.valid     := false.B
+      scq(sc_enq_idx).bits.state          := s_init
+      scq(sc_enq_idx).bits.tagged         := false.B
+      scq(sc_enq_idx).bits.ccache_hit     := false.B
+      scq(sc_enq_idx).bits.is_rob_head    := false.B
+
+      printf("[%d] Dispatch scq(%d) tag_mask: %x stq(%d) rob(%d) cstr: %d cclr: %d mem_cmd: %d\n",
+							io.core.tsc_reg, sc_enq_idx, next_live_tag_mask, io.core.dis_uops(w).bits.stq_idx,
+							io.core.dis_uops(w).bits.rob_idx, io.core.dis_uops(w).bits.cap_cmd === CAP_CS,
+							io.core.dis_uops(w).bits.cap_cmd === CAP_CC, io.core.dis_uops(w).bits.mem_cmd)
+    }
+
+    sl_enq_idx = Mux(dis_sl_val, WrapInc(sl_enq_idx, numSlqEntries), sl_enq_idx)
+
+    ss_enq_idx = Mux(dis_ss_val, WrapInc(ss_enq_idx, numSsqEntries), ss_enq_idx)
+
+    next_live_tag_mask = Mux(dis_sc_val, next_live_tag_mask | (1.U << sc_enq_idx),
+                              next_live_tag_mask)
+
+    sc_enq_idx = Mux(dis_sc_val, WrapInc(sc_enq_idx, numScqEntries), sc_enq_idx)
+  }
+
+  slq_tail := sl_enq_idx
+  ssq_tail := ss_enq_idx
+  scq_tail := sc_enq_idx
+
+	io.core.slq_nonempty := slq_nonempty
+	io.core.ssq_nonempty := ssq_nonempty
+	io.core.scq_nonempty := scq_nonempty
+  //yh+end
+
   io.dmem.force_order   := io.core.fence_dmem
-  io.core.fencei_rdy    := !stq_nonempty && io.dmem.ordered
+  //yh-io.core.fencei_rdy    := !stq_nonempty && io.dmem.ordered
+  io.core.fencei_rdy    := !stq_nonempty && !ssq_nonempty && !slq_nonempty && !scq_nonempty && io.dmem.ordered //yh+
+  //io.core.fencei_rdy    := !stq_nonempty && io.dmem.ordered //yh+
 
 
   //-------------------------------------------------------------
@@ -388,6 +796,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       exe_req := VecInit(Seq.fill(memWidth) { io.core.exe(i).req })
     }
   }
+
+  //yh+begin
+  val cap_exe_req = WireInit(VecInit(io.core.cap_exe.map(_.cap_req)))
+	val clr_needCC_valid = RegInit(VecInit(Seq.fill(memWidth+memWidth){false.B}))
+	val clr_needCC_rob_idx = Reg(Vec(memWidth+memWidth, UInt(robAddrSz.W)))
+	val clr_needCC_brmask = Reg(Vec(memWidth+memWidth, UInt(maxBrCount.W)))
+
+	for (w <- 0 until memWidth+memWidth) {
+		clr_needCC_valid(w) := false.B
+		clr_needCC_rob_idx(w) := 0.U
+		clr_needCC_brmask(w) := 0.U
+
+		io.core.clr_needCC(w).valid := (clr_needCC_valid(w) &&
+		                               !IsKilledByBranch(io.core.brupdate, clr_needCC_brmask(w)) &&
+		                               !io.core.exception && !RegNext(io.core.exception) && !RegNext(RegNext(io.core.exception)))
+		io.core.clr_needCC(w).bits	:= clr_needCC_rob_idx(w)
+	}
+  //yh+end
 
   // -------------------------------
   // Assorted signals for scheduling
@@ -433,6 +859,371 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     e.addr.valid && !e.executed && !e.succeeded && !e.addr_is_virtual && !block
   }), ldq_head))
   val ldq_wakeup_e   = ldq(ldq_wakeup_idx)
+
+	//yh+begin
+	//////////////////////////////////
+	// 1. Can update queue entries? //
+	//////////////////////////////////
+	// SLQ
+  val slq_update_idx = RegNext(AgePriorityEncoder((0 until numSlqEntries).map(i => {
+    val e = slq(i).bits
+		e.state === s_update
+  }), slq_head))
+  val slq_update_e = slq(slq_update_idx)
+
+	val can_update_ldchk = widthMap(w =>
+													slq_update_e.valid									        								&&
+													(slq_update_e.bits.state === s_update)	    								&&
+													!io.core.exception                  												&&
+													(ignoreDepMask || slq_update_e.bits.tag_dep_mask.asUInt === 0.U) &&
+													!IsKilledByBranch(io.core.brupdate, slq_update_e.bits.uop)	&&
+													(w == 0).B)
+
+	// SSQ
+  val ssq_update_idx = RegNext(AgePriorityEncoder((0 until numSsqEntries).map(i => {
+    val e = ssq(i).bits
+		e.state === s_update
+  }), ssq_head))
+  val ssq_update_e = ssq(ssq_update_idx)
+
+	val can_update_stchk = widthMap(w =>
+													ssq_update_e.valid									        								&&
+													(ssq_update_e.bits.state === s_update)	    								&&
+													!io.core.exception                  												&&
+													(ignoreDepMask || ssq_update_e.bits.tag_dep_mask.asUInt === 0.U) &&
+													!IsKilledByBranch(io.core.brupdate, ssq_update_e.bits.uop)	&&
+													(w == 0).B)
+
+	// SCQ
+  val scq_update_e = scq(scq_head)
+
+	val can_update_capst = widthMap(w =>
+													scq_update_e.valid									        								&&
+													(scq_update_e.bits.state === s_update)	    								&&
+													!io.core.exception                  												&&
+													!IsKilledByBranch(io.core.brupdate, scq_update_e.bits.uop)	&&
+													(w == 0).B)
+
+	for (w <- 0 until memWidth) {
+		when (can_update_ldchk(w) || can_update_stchk(w) || can_update_capst(w)) {
+			printf("can_update_ldchk: %d can_update_stchk: %d can_update_capst: %d\n",
+							can_update_ldchk(w), can_update_stchk(w), can_update_capst(w))
+		}
+	}
+
+  // Store/Clear Head Buffer
+  //val shb_meta = Reg(Vec(256, UInt((tagWidth/2).W)))
+  val shb_data = Reg(Vec(256, UInt(wayAddrSz.W)))
+  //val chb_meta = Reg(Vec(256, UInt((tagWidth/2).W)))
+  //val chb_data = Reg(Vec(256, UInt(wayAddrSz.W)))
+
+  // Capability Cache
+  val ccache_meta = Reg(Vec(256, UInt((tagWidth/2).W)))
+	val ccache_lbnd = Reg(Vec(256, UInt(vaddrBits.W)))
+	val ccache_ubnd = Reg(Vec(256, UInt(vaddrBits.W)))
+
+	for (w <- 0 until memWidth) {
+		// Update SLQ
+		when (can_update_ldchk(w)) {
+			val tag = slq_update_e.bits.tag
+			val tagged = slq_update_e.bits.tagged
+			val high4 = tag(tagWidth-1,tagWidth/2)
+			val low4 = tag(tagWidth/2-1,0)
+			val meta = ccache_meta(low4)
+			val low_bnd = (ccache_lbnd(low4) & bounds_margin)
+			//val upp_bnd = (ccache_ubnd(low4) + 1.U)
+			val upp_bnd = (ccache_ubnd(low4) & bounds_margin)
+			val addr = slq_update_e.bits.addr
+			val hit = (high4 === meta &&
+								(low_bnd(vaddrBits-1,0) <= addr(vaddrBits-1,0) && addr(vaddrBits-1,0) <= upp_bnd(vaddrBits-1,0)))
+
+			slq_update_e.bits.way					:= 0.U
+			slq_update_e.bits.state				:= Mux(hit || !tagged, s_done, s_fire)
+			slq_update_e.bits.ccache_hit	:= (tagged & hit)
+
+			when (tagged) {
+				val tag = slq_update_e.bits.tag
+				when (hit) { printf("[%d] C-Cache Hit! ", io.core.tsc_reg) }
+				.otherwise { printf("[%d] C-Cache Miss! ", io.core.tsc_reg) }
+				printf("slq(%d) tag: %x addr: %x, low_bnd: %x, upp_bnd: %x\n",
+								slq_update_idx, tag, addr, low_bnd, upp_bnd)
+			}
+
+			// Clear needCC
+			clr_needCC_valid(w)	:= (!tagged || hit)
+			clr_needCC_rob_idx(w)	:= slq_update_e.bits.uop.rob_idx
+			clr_needCC_brmask(w) := GetNewBrMask(io.core.brupdate, slq_update_e.bits.uop)
+			when (!tagged || hit) {
+				printf("[%d] Clear needCC(1) slq(%d) rob(%d)\n", io.core.tsc_reg, slq_update_idx, slq_update_e.bits.uop.rob_idx)
+			}
+		// Update SSQ
+		} .elsewhen (can_update_stchk(w)) {
+			val tag = ssq_update_e.bits.tag
+			val tagged = ssq_update_e.bits.tagged
+			val high4 = tag(tagWidth-1,tagWidth/2)
+			val low4 = tag(tagWidth/2-1,0)
+			val meta = ccache_meta(low4)
+			val low_bnd = ccache_lbnd(low4)
+			val upp_bnd = ccache_ubnd(low4)
+			val addr = ssq_update_e.bits.addr
+			val hit = (high4 === meta &&
+								(low_bnd(vaddrBits-1,0) <= addr(vaddrBits-1,0) && addr(vaddrBits-1,0) <= upp_bnd(vaddrBits-1,0)))
+
+			ssq_update_e.bits.way					:= 0.U
+			ssq_update_e.bits.state				:= Mux(hit || !tagged, s_done, s_fire)
+			ssq_update_e.bits.ccache_hit	:= (tagged & hit)
+
+			when (tagged) {
+				val tag = ssq_update_e.bits.tag
+				when (hit) { printf("[%d] C-Cache Hit! ", io.core.tsc_reg) }
+				.otherwise { printf("[%d] C-Cache Miss! ", io.core.tsc_reg) }
+				printf("ssq(%d) tag: %x addr: %x, low_bnd: %x, upp_bnd: %x\n",
+								ssq_update_idx, tag, addr, low_bnd, upp_bnd)
+			}
+
+			// Clear needCC
+			clr_needCC_valid(w)	:= (!tagged || hit)
+			clr_needCC_rob_idx(w)	:= ssq_update_e.bits.uop.rob_idx
+			clr_needCC_brmask(w) := GetNewBrMask(io.core.brupdate, ssq_update_e.bits.uop)
+			when (!tagged || hit) {
+				printf("[%d] Clear needCC(1) ssq(%d) rob(%d)\n", io.core.tsc_reg, ssq_update_idx, ssq_update_e.bits.uop.rob_idx)
+			}
+		}
+
+		// Update SCQ
+		when (can_update_capst(w)) {
+			val tag = scq_update_e.bits.tag
+			//val high4 = tag(tagWidth-1,tagWidth/2)
+			val low4 = tag(tagWidth/2-1,0)
+			val is_cstr = (scq_update_e.bits.uop.cap_cmd === CAP_CS)
+			val is_cclr = (scq_update_e.bits.uop.cap_cmd === CAP_CC)
+			//val meta = Mux(is_cstr, shb_meta(low4), chb_meta(low4))
+			//val hit = (high4 === meta)
+			//val cstr_head = WrapIncWay(shb_data(low4), scq_update_e.bits.num_ways)
+			//val cclr_head = chb_data(low4)
+			val head = shb_data(low4)
+
+			//scq_update_e.bits.way			:= Mux(hit, Mux(is_cstr, cstr_head, cclr_head), 0.U)
+			scq_update_e.bits.way			:= Mux(is_cstr, WrapIncWay(head, scq_update_e.bits.num_ways), head)
+			scq_update_e.bits.state		:= s_fire
+
+			//when (is_cstr) {
+				//printf("[%d] SHB Lookup! scq(%d) cstr_head: %d\n", io.core.tsc_reg, scq_head, cstr_head)
+				printf("[%d] SHB Lookup! scq(%d) cstr_head: %d\n", io.core.tsc_reg, scq_head, head)
+			//} .otherwise {
+			//	printf("[%d] CHB Lookup! scq(%d) cclr_head: %d\n", io.core.tsc_reg, scq_head, cclr_head)
+			//}
+		}
+	}
+
+	//////////////////////////////////
+	// 2. Can fire cap requests?    //
+	//////////////////////////////////
+	// SLQ
+  val block_ldchk_mask    = WireInit(VecInit((0 until numSlqEntries).map(x=>false.B)))
+  val p1_block_ldchk_mask = RegNext(block_ldchk_mask)
+  val p2_block_ldchk_mask = RegNext(p1_block_ldchk_mask)
+
+  val slq_fire_idx = RegNext(AgePriorityEncoder((0 until numSlqEntries).map(i => {
+    val e = slq(i).bits
+    val block = block_ldchk_mask(i) || p1_block_ldchk_mask(i)
+		(e.state === s_fire && !block)
+  }), slq_head))
+  val slq_fire_e = slq(slq_fire_idx)
+
+	val can_fire_ldchk = widthMap(w =>
+												slq_fire_e.valid									        								&&
+												(!disableSpec || slq_fire_e.bits.is_rob_head)							&&
+												(slq_fire_e.bits.state === s_fire)	    									&&
+												!p1_block_ldchk_mask(slq_fire_idx)  											&&
+												!p2_block_ldchk_mask(slq_fire_idx)  											&&
+												!io.core.exception                  											&&
+												RegNext(dtlb.io.req(w).ready) 														&&
+												!store_needs_order                        								&&
+												!mem_xcpt_valid                         									&&
+												(w == 0).B)
+
+	// SSQ
+  val block_stchk_mask    = WireInit(VecInit((0 until numSsqEntries).map(x=>false.B)))
+  val p1_block_stchk_mask = RegNext(block_stchk_mask)
+  val p2_block_stchk_mask = RegNext(p1_block_stchk_mask)
+
+  val ssq_fire_idx = RegNext(AgePriorityEncoder((0 until numSsqEntries).map(i => {
+    val e = ssq(i).bits
+    val block = block_stchk_mask(i) || p1_block_stchk_mask(i)
+		(e.state === s_fire && !block)
+  }), ssq_head))
+  val ssq_fire_e = ssq(ssq_fire_idx)
+
+	val can_fire_stchk = widthMap(w =>
+												ssq_fire_e.valid									        								&&
+												(!disableSpec || ssq_fire_e.bits.is_rob_head)							&&
+												(ssq_fire_e.bits.state === s_fire)	    									&&
+												!p1_block_stchk_mask(ssq_fire_idx) 												&&
+												!p2_block_stchk_mask(ssq_fire_idx) 												&&
+												!io.core.exception                  											&&
+												RegNext(dtlb.io.req(w).ready) 														&&
+												!store_needs_order                        								&&
+												!mem_xcpt_valid                         									&&
+												(w == 0).B)
+
+	// SCQ
+  val block_capst_mask    = WireInit(VecInit((0 until numScqEntries).map(x=>false.B)))
+  val p1_block_capst_mask = RegNext(block_capst_mask)
+  val p2_block_capst_mask = RegNext(p1_block_capst_mask)
+
+  val scq_fire_e = scq(scq_head)
+
+  val can_fire_capst = widthMap(w =>
+												scq_fire_e.valid                      										&&
+												scq_fire_e.bits.data.valid																&&
+												scq_fire_e.bits.is_rob_head																&&
+												(scq_fire_e.bits.state === s_fire ||
+													scq_fire_e.bits.state === s_fire2)											&&
+												!p1_block_capst_mask(scq_head)  									&&
+												!p2_block_capst_mask(scq_head)  									&&
+												!io.core.exception                  											&&
+												RegNext(dtlb.io.req(w).ready) 														&&
+												!store_needs_order                      									&&
+												!mem_xcpt_valid                         									&&
+												(w == 0).B)
+
+	// Pipeline 1 cycle
+  val will_fire_cap_check = Wire(Vec(memWidth, Bool()))
+  val will_fire_cap_store = Wire(Vec(memWidth, Bool()))
+
+	// Cap Check
+	val slq_fire_uop = widthMap(w => slq_fire_e.bits.uop)
+	val slq_fire_vaddr = widthMap(w => slq_fire_e.bits.cmt_addr + (slq_fire_e.bits.way << wayOffset))
+
+	val ssq_fire_uop = widthMap(w => ssq_fire_e.bits.uop)
+	val ssq_fire_vaddr = widthMap(w => ssq_fire_e.bits.cmt_addr + (ssq_fire_e.bits.way << wayOffset))
+
+	val can_fire_cap_check = Reg(Vec(memWidth, Bool()))
+	val cap_check_uop = Reg(Vec(memWidth, new MicroOp))
+  val cap_check_vaddr = Reg(Vec(memWidth, UInt((vaddrBits+1).W)))
+	val cap_check_idx = Reg(Vec(memWidth, UInt(ssqAddrSz.W)))
+  val can_fire_ldchk_p1 = Reg(Vec(memWidth, Bool()))
+	val fire_ldchk_valid = Wire(Vec(memWidth, Bool()))
+	val fire_stchk_valid = Wire(Vec(memWidth, Bool()))
+
+	// TODO: add w == 0 condition
+	for (w <- 0 until memWidth) {
+		fire_ldchk_valid(w) := (can_fire_ldchk(w) && !IsKilledByBranch(io.core.brupdate, slq_fire_e.bits.uop.br_mask))
+		fire_stchk_valid(w) := (can_fire_stchk(w) && !IsKilledByBranch(io.core.brupdate, ssq_fire_e.bits.uop.br_mask))
+
+		can_fire_cap_check(w) := (!will_fire_cap_check(w) && (fire_ldchk_valid(w) || fire_stchk_valid(w)))
+		cap_check_uop(w) := Mux(fire_ldchk_valid(w), slq_fire_uop(w), ssq_fire_uop(w))
+		cap_check_uop(w).br_mask := Mux(fire_ldchk_valid(w), GetNewBrMask(io.core.brupdate, slq_fire_uop(w).br_mask), 
+																		GetNewBrMask(io.core.brupdate, ssq_fire_uop(w).br_mask))
+		cap_check_vaddr(w) := Mux(fire_ldchk_valid(w), slq_fire_vaddr(w), ssq_fire_vaddr(w))
+		cap_check_idx(w) := Mux(fire_ldchk_valid(w), slq_fire_idx, ssq_fire_idx)
+		can_fire_ldchk_p1(w) := fire_ldchk_valid(w)
+	}
+
+	// Cap Store
+	val can_fire_cap_store = Reg(Vec(memWidth, Bool()))
+	val cap_store_uop = Reg(Vec(memWidth, new MicroOp))
+	for (w <- 0 until memWidth) {
+		can_fire_cap_store(w) := (!will_fire_cap_store(w) && can_fire_capst(w) &&
+		                         !IsKilledByBranch(io.core.brupdate, scq_fire_e.bits.uop.br_mask))
+		cap_store_uop(w) := scq_fire_e.bits.uop
+		cap_store_uop(w).br_mask := GetNewBrMask(io.core.brupdate, scq_fire_e.bits.uop.br_mask)
+    cap_store_uop(w).mem_cmd := Mux(scq_fire_e.bits.state === s_fire2, rocket.M_XWR,
+                                    scq_fire_e.bits.uop.mem_cmd)
+    when (can_fire_capst(w)) {
+      printf("[%d] state: %d mem_cmd: (%d, %d) bounds_margin: %x\n", io.core.tsc_reg, scq_fire_e.bits.state,
+              scq_fire_e.bits.uop.mem_cmd,
+              Mux(scq_fire_e.bits.state === s_fire2, rocket.M_XWR, cap_store_uop(w).mem_cmd), bounds_margin)
+    }
+	}
+
+	val cap_vaddr = (scq_fire_e.bits.cmt_addr + (scq_fire_e.bits.way << wayOffset))
+	val cap_store_vaddr = RegNext(widthMap(w => Mux(scq_fire_e.bits.state === s_fire,
+													cap_vaddr, cap_vaddr | 8.U)))
+	val cap_store_data = RegNext(widthMap(w => Mux(scq_fire_e.bits.state === s_fire, scq_fire_e.bits.addr(vaddrBits-1,0),
+                        Mux(scq_fire_e.bits.uop.cap_cmd === CAP_CS,
+                          scq_fire_e.bits.addr(vaddrBits-1,0) + scq_fire_e.bits.data.bits(vaddrBits-1,0), 0.U))))
+	val cap_store_idx = RegNext(widthMap(w => scq_head))
+
+	for (w <- 0 until memWidth) {
+		when (fire_ldchk_valid(w)) {
+			printf("[%d] Can fire load check! slq(%d) vaddr: %x tag: %x way: %d\n",
+							io.core.tsc_reg, slq_fire_idx, slq_fire_vaddr(w),
+							slq_fire_e.bits.tag, slq_fire_e.bits.way)
+		} .elsewhen (fire_stchk_valid(w)) {
+			printf("[%d] Can fire store check! ssq(%d) vaddr: %x tag: %x way: %d\n",
+							io.core.tsc_reg, ssq_fire_idx, ssq_fire_vaddr(w),
+							ssq_fire_e.bits.tag, ssq_fire_e.bits.way)
+		}
+
+		when (can_fire_capst(w)) {
+			printf("[%d] Can fire cap store! scq(%d) vaddr: %x tag: %x way: %d\n",
+							io.core.tsc_reg, scq_head,
+							Mux(scq_fire_e.bits.state === s_fire, cap_vaddr, cap_vaddr | 8.U),
+							scq_fire_e.bits.tag, scq_fire_e.bits.way)
+		}
+	}
+
+  //printf("[%d] next_live_tag_mask: %x\n", io.core.tsc_reg, next_live_tag_mask)
+
+	//////////////////////////////////
+	// 3. Detect Failures    				//
+	//////////////////////////////////
+	val slq_head_e = slq(slq_head)
+	val ssq_head_e = ssq(ssq_head)
+	val scq_head_e = scq(scq_head)
+
+	val ldchk_xcpt_valid = (slq_head_e.valid &&
+													slq_head_e.bits.state === s_fail &&
+													slq_head_e.bits.is_rob_head)
+
+	val stchk_xcpt_valid = (ssq_head_e.valid &&
+													ssq_head_e.bits.state === s_fail &&
+													ssq_head_e.bits.is_rob_head)
+
+	val capst_xcpt_valid = (scq_head_e.valid &&
+													scq_head_e.bits.state === s_fail &&
+													scq_head_e.bits.is_rob_head)
+
+ 	when (ldchk_xcpt_valid) {
+		printf("[%d] Found ldchk_xcpt_valid! slq(%d) rob(%d)\n",
+							io.core.tsc_reg, slq_head, slq_head_e.bits.uop.rob_idx)
+  } .elsewhen (stchk_xcpt_valid) {
+		printf("[%d] Found stchk_xcpt_valid! ssq(%d) rob(%d)\n",
+							io.core.tsc_reg, ssq_head, ssq_head_e.bits.uop.rob_idx)
+  } .elsewhen (capst_xcpt_valid) {
+		printf("[%d] Found capst_xcpt_valid! scq(%d) rob(%d)\n",
+							io.core.tsc_reg, scq_head, scq_head_e.bits.uop.rob_idx)
+	}
+
+	val dpt_xcpt_valid = RegNext(ldchk_xcpt_valid || stchk_xcpt_valid || capst_xcpt_valid)
+
+	val dpt_xcpt_cause = RegNext(Mux(ldchk_xcpt_valid, rocket.Causes.ldchk_fault.U,
+											Mux(stchk_xcpt_valid, rocket.Causes.stchk_fault.U,
+												Mux(capst_xcpt_valid && scq_head_e.bits.uop.cap_cmd === CAP_CS,
+													rocket.Causes.cstr_fault.U, rocket.Causes.cclr_fault.U))))
+
+	val dpt_xcpt_uop = RegNext(Mux(ldchk_xcpt_valid, slq_head_e.bits.uop,
+											Mux(stchk_xcpt_valid, ssq_head_e.bits.uop,
+												Mux(capst_xcpt_valid, scq_head_e.bits.uop, NullMicroOp))))
+
+	val dpt_xcpt_addr = RegNext(Mux(ldchk_xcpt_valid, slq_head_e.bits.addr,
+											Mux(stchk_xcpt_valid, ssq_head_e.bits.addr,
+												Mux(capst_xcpt_valid, scq_head_e.bits.addr, 0.U))))
+
+	val update_shb_valid	= Reg(Vec(memWidth, Bool()))
+	//val update_chb_valid	= Reg(Vec(memWidth, Bool()))
+	//val update_hb_tag   	= Reg(Vec(memWidth, UInt(tagWidth.W)))
+	val update_hb_tag   	= Reg(Vec(memWidth, UInt((tagWidth/2).W)))
+	val update_hb_way   	= Reg(Vec(memWidth, UInt(wayAddrSz.W)))
+	//TODO val update_hb_dir  		= Reg(Vec(memWidth, Bool()))
+
+	for (w <- 0 until memWidth) {
+		update_shb_valid(w) := false.B
+		//update_chb_valid(w) := false.B
+	}
+	//yh+end
 
   // -----------------------
   // Determine what can fire
@@ -562,7 +1353,21 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     will_fire_sta_retry     (w) := lsu_sched(can_fire_sta_retry     (w) , true , false, true , true)  // TLB ,    , LCAM , ROB // TODO: This should be higher priority
     will_fire_load_wakeup   (w) := lsu_sched(can_fire_load_wakeup   (w) , false, true , true , false) //     , DC , LCAM1
     will_fire_store_commit  (w) := lsu_sched(can_fire_store_commit  (w) , false, true , false, false) //     , DC
+		//yh+begin
+    will_fire_cap_check     (w) := lsu_sched(can_fire_cap_check     (w) , true , true , false, false) // TLB , DC
+    will_fire_cap_store     (w) := lsu_sched(can_fire_cap_store     (w) , true , true , false, false) // TLB , DC
 
+    when (will_fire_cap_check(w)) {
+      when (can_fire_ldchk_p1(w)) {
+        block_ldchk_mask(cap_check_idx(w)) := true.B
+      } .otherwise {
+        assert(!can_fire_ldchk_p1(w))
+        block_stchk_mask(cap_check_idx(w)) := true.B
+      }
+    } .elsewhen (will_fire_cap_store(w)) {
+      block_capst_mask(cap_store_idx(w)) := true.B
+		}
+		//yh+end
 
     assert(!(exe_req(w).valid && !(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) || will_fire_std_incoming(w) || will_fire_sfence(w))))
 
@@ -601,7 +1406,12 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                     Mux(will_fire_load_retry    (w)  , ldq_retry_e.bits.uop,
                     Mux(will_fire_sta_retry     (w)  , stq_retry_e.bits.uop,
                     Mux(will_fire_hella_incoming(w)  , NullMicroOp,
-                                                       NullMicroOp)))))
+										//yh+begin
+                    Mux(will_fire_cap_check    (w)   , cap_check_uop(w),
+                    Mux(will_fire_cap_store    (w)   , cap_store_uop(w),
+                                                       NullMicroOp)))))))
+										//yh+end
+                    //yh-                                   NullMicroOp)))))
 
   val exe_tlb_vaddr = widthMap(w =>
                     Mux(will_fire_load_incoming (w) ||
@@ -611,7 +1421,12 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                     Mux(will_fire_load_retry    (w)  , ldq_retry_e.bits.addr.bits,
                     Mux(will_fire_sta_retry     (w)  , stq_retry_e.bits.addr.bits,
                     Mux(will_fire_hella_incoming(w)  , hella_req.addr,
-                                                       0.U))))))
+										//yh+begin
+										Mux(will_fire_cap_check		(w)    , cap_check_vaddr(w),
+										Mux(will_fire_cap_store		(w)    , cap_store_vaddr(w),
+                                                       0.U))))))))
+										//yh+end
+                    //yh-                                   0.U))))))
 
   val exe_sfence = WireInit((0.U).asTypeOf(Valid(new rocket.SFenceReq)))
   for (w <- 0 until memWidth) {
@@ -626,6 +1441,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                        will_fire_sta_incoming  (w) ||
                        will_fire_sfence        (w) ||
                        will_fire_load_retry    (w) ||
+											 //yh+begin
+									     will_fire_cap_check		 (w) ||
+									     will_fire_cap_store		 (w) ||
+		 									 //yh+end
                        will_fire_sta_retry     (w)  , exe_tlb_uop(w).mem_size,
                    Mux(will_fire_hella_incoming(w)  , hella_req.size,
                                                       0.U)))
@@ -635,6 +1454,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                        will_fire_sta_incoming  (w) ||
                        will_fire_sfence        (w) ||
                        will_fire_load_retry    (w) ||
+											 //yh+begin
+									     will_fire_cap_check		 (w) ||
+									     will_fire_cap_store		 (w) ||
+		 									 //yh+end
                        will_fire_sta_retry     (w)  , exe_tlb_uop(w).mem_cmd,
                    Mux(will_fire_hella_incoming(w)  , hella_req.cmd,
                                                       0.U)))
@@ -645,6 +1468,49 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val exe_kill   = widthMap(w =>
                    Mux(will_fire_hella_incoming(w)  , io.hellacache.s1_kill,
                                                       false.B))
+
+	//yh+begin
+	val cap_ldchk_incoming = widthMap(w => cap_exe_req(w).valid && cap_exe_req(w).bits.uop.cap_cmd === CAP_LD)
+
+	val cap_stchk_incoming = widthMap(w => cap_exe_req(w).valid && cap_exe_req(w).bits.uop.cap_cmd === CAP_ST
+																					&& cap_exe_req(w).bits.uop.ctrl.is_sta)
+
+	// cstr, cclr
+	val cap_capsta_incoming = widthMap(w => cap_exe_req(w).valid && cap_exe_req(w).bits.uop.cap_cmd(1)
+																					&& cap_exe_req(w).bits.uop.ctrl.is_sta)
+
+	val cap_capstd_incoming = widthMap(w => cap_exe_req(w).valid && cap_exe_req(w).bits.uop.cap_cmd(1)
+																					&& cap_exe_req(w).bits.uop.ctrl.is_std)
+
+  // Write C-Cache
+  val ccache_write_lbnd_val = Reg(Vec(memWidth, Bool()))
+  val ccache_write_ubnd_val = Reg(Vec(memWidth, Bool()))
+  val ccache_write_tag = Reg(Vec(memWidth, UInt(tagWidth.W)))
+  val ccache_write_lbnd_data = Reg(Vec(memWidth, UInt(vaddrBits.W)))
+  val ccache_write_ubnd_data = Reg(Vec(memWidth, UInt(vaddrBits.W)))
+
+  for (w <- 0 until memWidth) {
+    ccache_write_lbnd_val(w) := false.B
+    ccache_write_ubnd_val(w) := false.B
+    ccache_write_tag(w) := 0.U
+    ccache_write_lbnd_data(w) := 0.U
+    ccache_write_ubnd_data(w) := 0.U
+
+    when (ccache_write_lbnd_val(w)) {
+			ccache_meta(ccache_write_tag(w)(tagWidth/2-1,0)) := ccache_write_tag(w)(tagWidth-1,tagWidth/2)
+      ccache_lbnd(ccache_write_tag(w)(tagWidth/2-1,0)) := ccache_write_lbnd_data(w)
+      printf("[%d] Write C-Cache! tag: %x lbnd: %x\n",
+							io.core.tsc_reg, ccache_write_tag(w), ccache_write_lbnd_data(w))
+    }
+
+    when (ccache_write_ubnd_val(w)) {
+      ccache_ubnd(ccache_write_tag(w)(tagWidth/2-1,0)) := ccache_write_ubnd_data(w)
+      printf("[%d] Write C-Cache! tag: %x ubnd: %x\n",
+							io.core.tsc_reg, ccache_write_tag(w), ccache_write_ubnd_data(w))
+		}
+  }
+	//yh+end
+
   for (w <- 0 until memWidth) {
     dtlb.io.req(w).valid            := exe_tlb_valid(w)
     dtlb.io.req(w).bits.vaddr       := exe_tlb_vaddr(w)
@@ -717,11 +1583,19 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     when (mem_xcpt_valids(w))
     {
+      //yh-assert(RegNext(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) ||
+      //yh-  will_fire_load_retry(w) || will_fire_sta_retry(w)))
+			//yh+begin
       assert(RegNext(will_fire_load_incoming(w) || will_fire_stad_incoming(w) || will_fire_sta_incoming(w) ||
-        will_fire_load_retry(w) || will_fire_sta_retry(w)))
+        will_fire_load_retry(w) || will_fire_sta_retry(w) || will_fire_cap_check(w) || will_fire_cap_store(w)))
+			//yh+end
       // Technically only faulting AMOs need this
       assert(mem_xcpt_uops(w).uses_ldq ^ mem_xcpt_uops(w).uses_stq)
-      when (mem_xcpt_uops(w).uses_ldq)
+      //yh-when (mem_xcpt_uops(w).uses_ldq)
+			//yh+begin
+			when (mem_xcpt_uops(w).is_cap) {
+      } .elsewhen (mem_xcpt_uops(w).uses_ldq)
+			//yh+end
       {
         ldq(mem_xcpt_uops(w).ldq_idx).bits.uop.exception := true.B
       }
@@ -769,16 +1643,32 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
 
       s0_executing_loads(ldq_incoming_idx(w)) := dmem_req_fire(w)
       assert(!ldq_incoming_e(w).bits.executed)
+
+			//yh+begin
+      when (dmem_req_fire(w)) {
+        printf("[%d] Fire load incoming ldq(%d) addr: %x\n",
+                io.core.tsc_reg, exe_tlb_uop(w).ldq_idx, exe_tlb_paddr(w))
+      }
+			//yh+end
     } .elsewhen (will_fire_load_retry(w)) {
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
 
       s0_executing_loads(ldq_retry_idx) := dmem_req_fire(w)
       assert(!ldq_retry_e.bits.executed)
+
+			//yh+begin
+      when (dmem_req_fire(w)) {
+        printf("[%d] Fire load retry ldq(%d) addr: %x\n",
+                io.core.tsc_reg, exe_tlb_uop(w).ldq_idx, exe_tlb_paddr(w))
+      }
+			//yh+end
     } .elsewhen (will_fire_store_commit(w)) {
       dmem_req(w).valid         := true.B
       dmem_req(w).bits.addr     := stq_commit_e.bits.addr.bits
@@ -787,20 +1677,37 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                                     stq_commit_e.bits.data.bits,
                                     coreDataBytes)).data
       dmem_req(w).bits.uop      := stq_commit_e.bits.uop
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
 
       stq_execute_head                     := Mux(dmem_req_fire(w),
                                                 WrapInc(stq_execute_head, numStqEntries),
                                                 stq_execute_head)
 
       stq(stq_execute_head).bits.succeeded := false.B
+
+			//yh+begin
+      when (dmem_req_fire(w)) {
+        printf("[%d] Fire store commit stq(%d) addr: %x data: %x\n",
+                io.core.tsc_reg, stq_commit_e.bits.uop.stq_idx,
+								stq_commit_e.bits.addr.bits, stq_commit_e.bits.data.bits)
+      }
+			//yh+end
     } .elsewhen (will_fire_load_wakeup(w)) {
       dmem_req(w).valid      := true.B
       dmem_req(w).bits.addr  := ldq_wakeup_e.bits.addr.bits
       dmem_req(w).bits.uop   := ldq_wakeup_e.bits.uop
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
 
       s0_executing_loads(ldq_wakeup_idx) := dmem_req_fire(w)
 
       assert(!ldq_wakeup_e.bits.executed && !ldq_wakeup_e.bits.addr_is_virtual)
+
+			//yh+begin
+      when (dmem_req_fire(w)) {
+        printf("[%d] Fire load wakeup ldq(%d) addr: %x\n",
+                io.core.tsc_reg, ldq_wakeup_e.bits.uop.ldq_idx, ldq_wakeup_e.bits.addr.bits)
+      }
+			//yh+end
     } .elsewhen (will_fire_hella_incoming(w)) {
       assert(hella_state === h_s1)
 
@@ -814,6 +1721,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).bits.uop.mem_size   := hella_req.size
       dmem_req(w).bits.uop.mem_signed := hella_req.signed
       dmem_req(w).bits.is_hella       := true.B
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
 
       hella_paddr := exe_tlb_paddr(w)
     }
@@ -830,7 +1738,63 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).bits.uop.mem_size   := hella_req.size
       dmem_req(w).bits.uop.mem_signed := hella_req.signed
       dmem_req(w).bits.is_hella       := true.B
+			dmem_req(w).bits.uop.is_cap := false.B //yh+
     }
+		//yh+begin
+      .elsewhen (will_fire_cap_check(w))
+    {
+      dmem_req(w).valid               := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
+      dmem_req(w).bits.addr           := exe_tlb_paddr(w)
+      dmem_req(w).bits.uop            := exe_tlb_uop(w)
+
+      when (dmem_req_fire(w)) {
+				printf("[%d] Fire cap check! ", io.core.tsc_reg) 
+	      when (can_fire_ldchk_p1(w)) {
+          printf("slq(%d) vaddr: %x paddr: %x ", exe_tlb_uop(w).slq_idx, exe_tlb_vaddr(w), exe_tlb_paddr(w))
+					assert(exe_tlb_uop(w).slq_idx === cap_check_idx(w))
+        } .otherwise {
+          printf("ssq(%d) vaddr: %x paddr: %x ", exe_tlb_uop(w).ssq_idx, exe_tlb_vaddr(w), exe_tlb_paddr(w))
+					assert(exe_tlb_uop(w).ssq_idx === cap_check_idx(w))
+        }
+        printf("is_cap: %d uses_ldq: %d uses_stq: %d\n",
+                exe_tlb_uop(w).is_cap, exe_tlb_uop(w).uses_ldq, exe_tlb_uop(w).uses_stq)
+
+        assert(exe_tlb_uop(w).is_cap && exe_tlb_uop(w).uses_ldq && !exe_tlb_uop(w).uses_stq)
+      }
+
+      when (can_fire_ldchk_p1(w)) {
+        slq(cap_check_idx(w)).bits.state := Mux(dmem_req_fire(w), s_wait,
+                                         		slq(cap_check_idx(w)).bits.state)
+      } .otherwise {
+        ssq(cap_check_idx(w)).bits.state := Mux(dmem_req_fire(w), s_wait,
+                                         		ssq(cap_check_idx(w)).bits.state)
+      }
+    }
+      .elsewhen (will_fire_cap_store(w))
+    {
+      dmem_req(w).valid               := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
+      dmem_req(w).bits.addr           := exe_tlb_paddr(w)
+      dmem_req(w).bits.uop            := exe_tlb_uop(w)
+      dmem_req(w).bits.uop.uses_stq   := false.B // To prevent store dependency checks
+      dmem_req(w).bits.data						:= (new freechips.rocketchip.rocket.StoreGen(
+																					3.U, 0.U,
+																					cap_store_data(w),
+																					coreDataBytes)).data
+
+			scq(cap_store_idx(w)).bits.state := Mux(dmem_req_fire(w),
+																					Mux(scq(cap_store_idx(w)).bits.state === s_fire, s_wait, s_wait2),
+																					scq(cap_store_idx(w)).bits.state)
+
+      when (dmem_req_fire(w)) {
+				printf("[%d] Fire cap store! scq(%d) vaddr: %x paddr: %x data: %x scq_head: %d mem_cmd: %d\n",
+								io.core.tsc_reg, exe_tlb_uop(w).scq_idx, exe_tlb_vaddr(w),
+								exe_tlb_paddr(w), cap_store_data(w), scq_head, exe_tlb_uop(w).mem_cmd)
+      }
+
+			assert(exe_tlb_uop(w).scq_idx === cap_store_idx(w))
+      assert(exe_tlb_uop(w).is_cap && !exe_tlb_uop(w).uses_ldq && exe_tlb_uop(w).uses_stq)
+		}
+		//yh+end
 
     //-------------------------------------------------------------
     // Write Addr into the LAQ/SAQ
@@ -879,9 +1843,117 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       assert(!(stq(sidx).bits.data.valid),
         "[lsu] Incoming store is overwriting a valid data entry")
     }
+
+		//yh+begin
+    //-------------------------------------------------------------
+    // Write Addr into the SLQ/SSQ
+    when (cap_ldchk_incoming(w)) {
+			val slq_idx = cap_exe_req(w).bits.uop.slq_idx
+
+			slq(slq_idx).bits.tag				:= cap_exe_req(w).bits.tag
+			slq(slq_idx).bits.tagged		:= cap_exe_req(w).bits.tagged
+			slq(slq_idx).bits.addr			:= cap_exe_req(w).bits.addr
+			//slq(slq_idx).bits.dir				:= cap_exe_req(w).bits.dir
+			slq(slq_idx).bits.count 		:= (cap_exe_req(w).bits.num_ways - 1.U)
+			slq(slq_idx).bits.state 		:= s_update
+			slq(slq_idx).bits.cmt_addr	:= cap_exe_req(w).bits.cmt_addr
+			slq(slq_idx).bits.num_ways	:= cap_exe_req(w).bits.num_ways
+
+			//printf("[%d] Exe(ldchk) slq(%d) tag: %x tagged: %d addr: %x dir: %d state: %d mask: %x\n",
+			printf("[%d] Exe(ldchk) slq(%d) tag: %x tagged: %d addr: %x state: %d mask: %x\n",
+							io.core.tsc_reg, slq_idx, cap_exe_req(w).bits.tag, cap_exe_req(w).bits.tagged,
+							//cap_exe_req(w).bits.addr, cap_exe_req(w).bits.dir, s_update, slq(slq_idx).bits.tag_dep_mask)
+							cap_exe_req(w).bits.addr, s_update, slq(slq_idx).bits.tag_dep_mask)
+
+			assert(slq(slq_idx).bits.state === s_init)
+    }
+
+    when (cap_stchk_incoming(w)) {
+			val ssq_idx = cap_exe_req(w).bits.uop.ssq_idx
+
+			ssq(ssq_idx).bits.tag				:= cap_exe_req(w).bits.tag
+			ssq(ssq_idx).bits.tagged		:= cap_exe_req(w).bits.tagged
+			ssq(ssq_idx).bits.addr			:= cap_exe_req(w).bits.addr
+			//ssq(ssq_idx).bits.dir				:= cap_exe_req(w).bits.dir
+			ssq(ssq_idx).bits.count 		:= (cap_exe_req(w).bits.num_ways - 1.U)
+			ssq(ssq_idx).bits.state 		:= s_update
+			ssq(ssq_idx).bits.cmt_addr	:= cap_exe_req(w).bits.cmt_addr
+			ssq(ssq_idx).bits.num_ways	:= cap_exe_req(w).bits.num_ways
+
+			//printf("[%d] Exe(stchk) ssq(%d) tag: %x tagged: %d addr: %x dir: %d state: %d mask: %x\n",
+			printf("[%d] Exe(stchk) ssq(%d) tag: %x tagged: %d addr: %x state: %d mask: %x\n",
+							io.core.tsc_reg, ssq_idx, cap_exe_req(w).bits.tag, cap_exe_req(w).bits.tagged,
+							//cap_exe_req(w).bits.addr, cap_exe_req(w).bits.dir, s_update, ssq(ssq_idx).bits.tag_dep_mask)
+							cap_exe_req(w).bits.addr, s_update, ssq(ssq_idx).bits.tag_dep_mask)
+
+			assert(ssq(ssq_idx).bits.state === s_init)
+    }
+
+    when (cap_capsta_incoming(w)) {
+			val scq_idx = cap_exe_req(w).bits.uop.scq_idx
+
+			scq(scq_idx).bits.tag				:= cap_exe_req(w).bits.tag
+			scq(scq_idx).bits.tagged		:= cap_exe_req(w).bits.tagged
+			scq(scq_idx).bits.addr			:= cap_exe_req(w).bits.addr
+			//scq(scq_idx).bits.dir				:= cap_exe_req(w).bits.dir
+			scq(scq_idx).bits.count 		:= (cap_exe_req(w).bits.num_ways - 1.U)
+			scq(scq_idx).bits.state 		:= s_update
+			scq(scq_idx).bits.cmt_addr	:= cap_exe_req(w).bits.cmt_addr
+			scq(scq_idx).bits.num_ways	:= cap_exe_req(w).bits.num_ways
+
+			//printf("[%d] Exe(capst) scq(%d) cstr: %d cclr: %d tag: %x tagged: %d addr: %x dir: %d state: %d\n",
+			printf("[%d] Exe(capst) scq(%d) cstr: %d cclr: %d tag: %x tagged: %d addr: %x state: %d\n",
+							io.core.tsc_reg, scq_idx, cap_exe_req(w).bits.uop.cap_cmd === CAP_CS,
+							cap_exe_req(w).bits.uop.cap_cmd === CAP_CC, cap_exe_req(w).bits.tag,
+							//cap_exe_req(w).bits.tagged, cap_exe_req(w).bits.addr, cap_exe_req(w).bits.dir, s_update)
+							cap_exe_req(w).bits.tagged, cap_exe_req(w).bits.addr, s_update)
+
+			assert(scq(scq_idx).bits.state === s_init)
+    }
+
+		when (cap_ldchk_incoming(w) || cap_stchk_incoming(w) || cap_capsta_incoming(w)) {
+			printf("[%d] Exe(*) cmt_addr: %x num_ways: %d\n",
+							io.core.tsc_reg, cap_exe_req(w).bits.cmt_addr, cap_exe_req(w).bits.num_ways)
+		}
+
+    when (cap_capstd_incoming(w)) {
+			val scq_idx = cap_exe_req(w).bits.uop.scq_idx
+
+			scq(scq_idx).bits.data.valid	:= true.B
+			scq(scq_idx).bits.data.bits		:= cap_exe_req(w).bits.data
+
+      assert(!(scq(scq_idx).bits.data.valid),
+        "[lsu] Incoming cap store is overwriting a valid data entry")
+
+			printf("[%d] Data(capst) scq(%d) cstr: %d cclr: %d data: %x\n",
+							io.core.tsc_reg, scq_idx, cap_exe_req(w).bits.uop.cap_cmd === CAP_CS,
+							cap_exe_req(w).bits.uop.cap_cmd === CAP_CC, cap_exe_req(w).bits.data)
+    }
+		//yh+end
   }
   val will_fire_stdf_incoming = io.core.fp_stdata.fire
   require (xLen >= fLen) // for correct SDQ size
+
+	//yh+begin
+	val fired_dmem_req_ldst = widthMap(w => RegNext(dmem_req_fire(w) && 
+																					!dmem_req(w).bits.uop.is_cap))
+	val fired_dmem_req_bounds = widthMap(w => RegNext(dmem_req_fire(w) && 
+																					dmem_req(w).bits.uop.is_cap))
+	var temp_ldst_traffic = ldst_traffic
+	var temp_bounds_traffic = bounds_traffic
+
+	for (w <- 0 until memWidth) {
+		temp_ldst_traffic = Mux(enableStat & fired_dmem_req_ldst(w),
+														temp_ldst_traffic + 1.U, temp_ldst_traffic)
+		temp_bounds_traffic = Mux(enableStat & fired_dmem_req_bounds(w),
+															temp_bounds_traffic + 1.U, temp_bounds_traffic)
+	}
+
+	ldst_traffic := Mux(initDPT, io.core.dpt_csrs.ldst_traffic,
+											temp_ldst_traffic)
+	bounds_traffic := Mux(initDPT, io.core.dpt_csrs.bounds_traffic,
+												temp_bounds_traffic)
+	//yh+end
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------
@@ -1240,17 +2312,42 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val ld_xcpt_valid = failed_loads.reduce(_|_)
   val ld_xcpt_uop   = ldq(Mux(l_idx >= numLdqEntries.U, l_idx - numLdqEntries.U, l_idx)).bits.uop
 
-  val use_mem_xcpt = (mem_xcpt_valid && IsOlder(mem_xcpt_uop.rob_idx, ld_xcpt_uop.rob_idx, io.core.rob_head_idx)) || !ld_xcpt_valid
+  //yh-val use_mem_xcpt = (mem_xcpt_valid && IsOlder(mem_xcpt_uop.rob_idx, ld_xcpt_uop.rob_idx, io.core.rob_head_idx)) || !ld_xcpt_valid
 
-  val xcpt_uop = Mux(use_mem_xcpt, mem_xcpt_uop, ld_xcpt_uop)
+  //yh-val xcpt_uop = Mux(use_mem_xcpt, mem_xcpt_uop, ld_xcpt_uop)
 
-  r_xcpt_valid := (ld_xcpt_valid || mem_xcpt_valid) &&
+  //yh-r_xcpt_valid := (ld_xcpt_valid || mem_xcpt_valid) &&
+  //yh-                 !io.core.exception &&
+  //yh-                 !IsKilledByBranch(io.core.brupdate, xcpt_uop)
+
+	//yh+begin
+  //val use_mem_xcpt = (mem_xcpt_valid && IsOlder(mem_xcpt_uop.rob_idx, ld_xcpt_uop.rob_idx, io.core.rob_head_idx)) || !ld_xcpt_valid
+  val use_mem_xcpt = mem_xcpt_valid && (IsOlder(mem_xcpt_uop.rob_idx, ld_xcpt_uop.rob_idx, io.core.rob_head_idx) || !ld_xcpt_valid)
+  val use_ld_xcpt = ld_xcpt_valid
+  //val use_mem_xcpt = ((mem_xcpt_valid && IsOlder(mem_xcpt_uop.rob_idx, ld_xcpt_uop.rob_idx, io.core.rob_head_idx) &&
+	//											IsOlder(mem_xcpt_uop.rob_idx, dpt_xcpt_uop.rob_idx, io.core.rob_head_idx)) || !(ld_xcpt_valid || dpt_xcpt_valid))
+  //val use_ld_xcpt = (ld_xcpt_valid && IsOlder(ld_xcpt_uop.rob_idx, dpt_xcpt_uop.rob_idx, io.core.rob_head_idx)) || !dpt_xcpt_valid
+	val xcpt_uop = Mux(use_mem_xcpt, mem_xcpt_uop,
+											Mux(use_ld_xcpt, ld_xcpt_uop, dpt_xcpt_uop))
+
+  r_xcpt_valid := ((ld_xcpt_valid || mem_xcpt_valid || dpt_xcpt_valid) &&
                    !io.core.exception &&
-                   !IsKilledByBranch(io.core.brupdate, xcpt_uop)
+                   !IsKilledByBranch(io.core.brupdate, xcpt_uop))
+	//yh+end
   r_xcpt.uop         := xcpt_uop
   r_xcpt.uop.br_mask := GetNewBrMask(io.core.brupdate, xcpt_uop)
-  r_xcpt.cause       := Mux(use_mem_xcpt, mem_xcpt_cause, MINI_EXCEPTION_MEM_ORDERING)
-  r_xcpt.badvaddr    := mem_xcpt_vaddr // TODO is there another register we can use instead?
+  //yh-r_xcpt.cause       := Mux(use_mem_xcpt, mem_xcpt_cause, MINI_EXCEPTION_MEM_ORDERING)
+  //yh-r_xcpt.badvaddr    := mem_xcpt_vaddr // TODO is there another register we can use instead?
+	//yh+begin
+  r_xcpt.cause       := Mux(use_mem_xcpt, mem_xcpt_cause, 
+														Mux(use_ld_xcpt, MINI_EXCEPTION_MEM_ORDERING, dpt_xcpt_cause))
+  r_xcpt.badvaddr    := Mux(use_mem_xcpt || use_ld_xcpt, mem_xcpt_vaddr, dpt_xcpt_addr)
+
+	when (r_xcpt_valid) {
+		printf("[%d] Found r_xcpt_valid! rob(%d) badvaddr: %x use_mem_xcpt: %d use_ld_xcpt: %d dpt_xcpt_valid: %d\n",
+						io.core.tsc_reg, r_xcpt.uop.rob_idx, r_xcpt.badvaddr, use_mem_xcpt, use_ld_xcpt, dpt_xcpt_valid)
+	}
+	//yh+end
 
   io.core.lxcpt.valid := r_xcpt_valid && !io.core.exception && !IsKilledByBranch(io.core.brupdate, r_xcpt.uop)
   io.core.lxcpt.bits  := r_xcpt
@@ -1294,13 +2391,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         assert(ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed)
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed  := false.B
         nacking_loads(io.dmem.nack(w).bits.uop.ldq_idx) := true.B
+
+				//yh+begin
+				printf("[%d] Received LD-NACK ldq(%d) slq(%d)\n",
+								io.core.tsc_reg, io.dmem.nack(w).bits.uop.ldq_idx, io.dmem.nack(w).bits.uop.slq_idx)
+				//yh+end
       }
         .otherwise
+        //.elsewhen (io.dmem.nack(w).bits.uop.uses_stq) //yh+
       {
         assert(io.dmem.nack(w).bits.uop.uses_stq)
         when (IsOlder(io.dmem.nack(w).bits.uop.stq_idx, stq_execute_head, stq_head)) {
           stq_execute_head := io.dmem.nack(w).bits.uop.stq_idx
         }
+
+				//yh+begin
+				printf("[%d] Received ST-NACK stq(%d) ssq(%d)\n",
+								io.core.tsc_reg, io.dmem.nack(w).bits.uop.stq_idx, io.dmem.nack(w).bits.uop.ssq_idx)
+				//yh+end
       }
     }
     // Handle the response
@@ -1325,6 +2433,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
         ldq(ldq_idx).bits.succeeded      := io.core.exe(w).iresp.valid || io.core.exe(w).fresp.valid
         ldq(ldq_idx).bits.debug_wb_data  := io.dmem.resp(w).bits.data
+				//yh+begin
+				assert(!io.dmem.resp(w).bits.uop.is_cap)
+				printf("[%d] Received LD-RESP ldq(%d) slq(%d)\n",
+								io.core.tsc_reg, io.dmem.resp(w).bits.uop.ldq_idx, io.dmem.resp(w).bits.uop.slq_idx)
+				//yh+end
       }
         .elsewhen (io.dmem.resp(w).bits.uop.uses_stq)
       {
@@ -1338,6 +2451,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
           stq(io.dmem.resp(w).bits.uop.stq_idx).bits.debug_wb_data := io.dmem.resp(w).bits.data
         }
+				//yh+begin
+				assert(!io.dmem.resp(w).bits.uop.is_cap)
+				printf("[%d] Received ST-RESP stq(%d) ssq(%d)\n",
+								io.core.tsc_reg, io.dmem.resp(w).bits.uop.stq_idx, io.dmem.resp(w).bits.uop.ssq_idx)
+				//yh+end
       }
     }
 
@@ -1375,7 +2493,145 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
         ldq(f_idx).bits.debug_wb_data   := loadgen.data
       }
+			//yh+begin
+			printf("[%d] Forward load ldq(%d)\n", io.core.tsc_reg, f_idx)
+			//yh+end
     }
+
+		//yh+begin
+    // Handle capability nacks
+    when (io.dmem.cap_nack(w).valid) {
+			val cap_nack_uop = io.dmem.cap_nack(w).bits.uop
+
+      when (cap_nack_uop.cap_cmd === CAP_LD) {
+				val slq_idx = cap_nack_uop.slq_idx
+        assert(slq(slq_idx).bits.state === s_wait)
+        slq(slq_idx).bits.state := s_fire
+
+        printf("[%d] Received CAP_LD-NACK! slq(%d)\n",
+                io.core.tsc_reg, io.dmem.cap_nack(w).bits.uop.slq_idx)
+      } .elsewhen (cap_nack_uop.cap_cmd === CAP_ST) {
+				val ssq_idx = cap_nack_uop.ssq_idx
+        assert(ssq(ssq_idx).bits.state === s_wait)
+        ssq(ssq_idx).bits.state := s_fire
+
+        printf("[%d] Received CAP_ST-NACK! ssq(%d)\n",
+                io.core.tsc_reg, io.dmem.cap_nack(w).bits.uop.ssq_idx)
+			} .otherwise {
+				val scq_idx = cap_nack_uop.scq_idx
+        scq(scq_idx).bits.state := Mux(scq(scq_idx).bits.state === s_wait, s_fire, s_fire2)
+
+        printf("[%d] Received CAP_C*-NACK! scq(%d)\n",
+                io.core.tsc_reg, io.dmem.cap_nack(w).bits.uop.scq_idx)
+        assert(scq(scq_idx).bits.state === s_wait || scq(scq_idx).bits.state === s_wait2)
+			}
+		}
+
+    // Handle the capability response
+    when (io.dmem.cap_resp(w).valid) {
+      val slq_idx = io.dmem.cap_resp(w).bits.uop.slq_idx
+      val ssq_idx = io.dmem.cap_resp(w).bits.uop.ssq_idx
+      val scq_idx = io.dmem.cap_resp(w).bits.uop.scq_idx
+			val is_ldst = !io.dmem.cap_resp(w).bits.uop.cap_cmd(1)
+			val is_load = (io.dmem.cap_resp(w).bits.uop.cap_cmd === CAP_LD)
+			val is_store = (io.dmem.cap_resp(w).bits.uop.cap_cmd === CAP_ST)
+			val is_cstr = (io.dmem.cap_resp(w).bits.uop.cap_cmd === CAP_CS)
+			val is_cclr = (io.dmem.cap_resp(w).bits.uop.cap_cmd === CAP_CC)
+
+			val addr = Mux(is_load, slq(slq_idx).bits.addr, ssq(ssq_idx).bits.addr)
+			val resp_lbnd = (io.dmem.resp(w).bits.dataBeats(vaddrBits-1,0) & bounds_margin)
+			//val resp_ubnd = Mux(is_load, io.dmem.resp(w).bits.dataBeats(xLen+vaddrBits-1,xLen) + 1.U,
+      //                    io.dmem.resp(w).bits.dataBeats(xLen+vaddrBits-1,xLen))
+			val resp_ubnd = (io.dmem.resp(w).bits.dataBeats(xLen+vaddrBits-1,xLen) & bounds_margin)
+			val resp_data = io.dmem.resp(w).bits.data(vaddrBits-1,0)
+
+			// Perform capability checks
+			val cap_chk = (is_ldst && (resp_lbnd(vaddrBits-1,0) <= addr(vaddrBits-1,0) &&
+																	addr(vaddrBits-1,0) <= resp_ubnd(vaddrBits-1,0)))
+																	//addr(vaddrBits-1,0) < resp_ubnd(vaddrBits-1,0)))
+			val occ_chk = ((is_cstr && resp_data(vaddrBits-1,0) === 0.U) ||
+											(is_cclr && resp_data(vaddrBits-1,0) === scq(scq_idx).bits.addr(vaddrBits-1,0)) ||
+											  (scq(scq_idx).bits.state === s_wait2))
+			val pass = (cap_chk | occ_chk)
+			val fail = (!pass &&
+									((is_load && slq(slq_idx).bits.count === 0.U) |
+									(is_store && ssq(ssq_idx).bits.count === 0.U) |
+									(!is_ldst && scq(scq_idx).bits.count === 0.U)))
+			val decr = (!pass && !fail)
+
+			printf("[%d] is_load: %d is_store: %d is_cstr: %d is_cclr: %d\n", io.core.tsc_reg, is_load, is_store, is_cstr, is_cclr)
+
+			val next_state = Mux(cap_chk, s_done,
+												Mux(occ_chk, Mux(scq(scq_idx).bits.state === s_wait, s_fire2, s_done),
+												Mux(decr, s_fire, Mux(!is_cstr && suppressFault, s_done, s_fail))))
+												//Mux(decr, s_fire, s_fail)))
+
+			when (cap_chk | occ_chk) { printf("[%d] Passed ", io.core.tsc_reg) }
+			.elsewhen (fail) { printf("[%d] Failed ", io.core.tsc_reg) }
+			.otherwise { printf("[%d] Decrement Count ", io.core.tsc_reg) }
+
+      when (is_load) {
+				slq(slq_idx).bits.state := next_state
+				// TODO just use WrapDecWay?
+				//TODO slq(slq_idx).bits.way := Mux(decr, WrapIncOrDecWay(slq(slq_idx).bits.dir, slq(slq_idx).bits.way, num_ways),
+				//TODO 															slq(slq_idx).bits.way)
+				slq(slq_idx).bits.way := Mux(decr, WrapIncWay(slq(slq_idx).bits.way, slq(slq_idx).bits.num_ways), slq(slq_idx).bits.way)
+				slq(slq_idx).bits.count := Mux(decr, slq(slq_idx).bits.count - 1.U, slq(slq_idx).bits.count)
+				
+				printf("slq(%d) addr: %x resp_lbnd: %x resp_ubnd: %x next_state: %d\n", slq_idx, addr, resp_lbnd, resp_ubnd, next_state)
+				assert(slq(slq_idx).bits.state === s_wait)
+      } .elsewhen (is_store) {
+				ssq(ssq_idx).bits.state := next_state
+				// TODO just use WrapDecWay?
+				//TODO ssq(ssq_idx).bits.way := Mux(decr, WrapIncOrDecWay(ssq(ssq_idx).bits.dir, ssq(ssq_idx).bits.way, num_ways),
+				//TODO 															ssq(ssq_idx).bits.way)
+				ssq(ssq_idx).bits.way := Mux(decr, WrapIncWay(ssq(ssq_idx).bits.way, ssq(ssq_idx).bits.num_ways), ssq(ssq_idx).bits.way)
+				ssq(ssq_idx).bits.count := Mux(decr, ssq(ssq_idx).bits.count - 1.U, ssq(ssq_idx).bits.count)
+
+				printf("ssq(%d) addr: %x resp_lbnd: %x resp_ubnd: %x next_state: %d\n", ssq_idx, addr, resp_lbnd, resp_ubnd, next_state)
+				assert(ssq(ssq_idx).bits.state === s_wait)
+			} .otherwise {
+				scq(scq_idx).bits.state := next_state
+				//TODO scq(scq_idx).bits.way := Mux(decr, WrapIncOrDecWay(scq(scq_idx).bits.dir, scq(scq_idx).bits.way, num_ways),
+				//TODO 															scq(scq_idx).bits.way)
+				scq(scq_idx).bits.way := Mux(decr, WrapIncWay(scq(scq_idx).bits.way, scq(scq_idx).bits.num_ways), scq(scq_idx).bits.way)
+				scq(scq_idx).bits.count := Mux(decr, scq(scq_idx).bits.count - 1.U, scq(scq_idx).bits.count)
+
+				printf("scq(%d) addr: %x resp_data: %x next_state: %d\n",
+								scq_idx, addr, resp_data, next_state)
+				assert(scq(scq_idx).bits.state === s_wait || scq(scq_idx).bits.state === s_wait2)
+			}
+
+			// Update ccache
+			ccache_write_lbnd_val(w) := (cap_chk | (occ_chk & scq(scq_idx).bits.state === s_wait))
+			ccache_write_ubnd_val(w) := (cap_chk | (occ_chk & scq(scq_idx).bits.state === s_wait2))
+			ccache_write_tag(w) := Mux(is_load, slq(slq_idx).bits.tag,
+															Mux(is_store, ssq(ssq_idx).bits.tag, scq(scq_idx).bits.tag))
+			ccache_write_lbnd_data(w) := Mux(occ_chk, Mux(is_cclr, 0.U, scq(scq_idx).bits.addr(vaddrBits-1,0)), resp_lbnd)
+			ccache_write_ubnd_data(w) := Mux(occ_chk, Mux(is_cclr, 0.U,
+                                      scq(scq_idx).bits.addr(vaddrBits-1,0) + scq(scq_idx).bits.data.bits(vaddrBits-1,0)), resp_ubnd)
+
+			// Clear needCC
+			//clr_needCC_valid(memWidth+w)		:= (pass || (fail && is_cclr))
+			clr_needCC_valid(memWidth+w)		:= (next_state === s_done)
+			clr_needCC_rob_idx(memWidth+w)	:= io.dmem.cap_resp(w).bits.uop.rob_idx
+			clr_needCC_brmask(memWidth+w)		:= GetNewBrMask(io.core.brupdate, io.dmem.cap_resp(w).bits.uop)
+
+			//when (!decr && !(fail && is_cstr)) {
+			when (next_state === s_done) {
+				printf("[%d] Clear needCC(2) rob(%d)\n", io.core.tsc_reg, io.dmem.cap_resp(w).bits.uop.rob_idx)
+			}
+
+			//update_shb_valid(w) := (is_cstr & next_state === s_done)
+			update_shb_valid(w) := ((is_cstr || is_cclr) && next_state === s_done)
+			//update_chb_valid(w) := (is_cclr & next_state === s_done)
+			//update_hb_tag(w)		:= scq(scq_idx).bits.tag
+			update_hb_tag(w)		:= scq(scq_idx).bits.tag(tagWidth/2-1,0)
+			//update_hb_way(w)		:= WrapIncWay(scq(scq_idx).bits.way, scq(scq_idx).bits.num_ways)
+			update_hb_way(w)		:= Mux(is_cstr, scq(scq_idx).bits.way,
+															WrapIncWay(scq(scq_idx).bits.way, scq(scq_idx).bits.num_ways))
+		}
+		//yh+end
   }
 
   // Initially assume the speculative load wakeup failed
@@ -1389,7 +2645,6 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   when (spec_ld_succeed) {
     io.core.ld_miss := false.B
   }
-
 
   //-------------------------------------------------------------
   // Kill speculated entries on branch mispredict
@@ -1412,6 +2667,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         stq(i).bits.addr.valid := false.B
         stq(i).bits.data.valid := false.B
         st_brkilled_mask(i)    := true.B
+				//yh+begin
+				printf("[%d] Misprediction inits stq(%d)\n", io.core.tsc_reg, i.U)
+				//yh+end
       }
     }
 
@@ -1429,15 +2687,89 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       {
         ldq(i).valid           := false.B
         ldq(i).bits.addr.valid := false.B
+				//yh+begin
+				printf("[%d] Misprediction inits ldq(%d)\n", io.core.tsc_reg, i.U)
+				//yh+end
       }
     }
   }
+
+  //yh+begin
+  // Kill SLQ entries
+  for (i <- 0 until numSlqEntries)
+  {
+    when (slq(i).valid)
+    {
+      slq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, slq(i).bits.uop.br_mask)
+
+      when (IsKilledByBranch(io.core.brupdate, slq(i).bits.uop))
+      {
+        slq(i).valid           := false.B
+				slq(i).bits.state			 := s_init
+				printf("[%d] Misprediction inits slq(%d)\n", io.core.tsc_reg, i.U)
+      }
+    }
+  }
+
+  // Kill SSQ entries
+  for (i <- 0 until numSsqEntries)
+  {
+    when (ssq(i).valid)
+    {
+      ssq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, ssq(i).bits.uop.br_mask)
+
+      when (IsKilledByBranch(io.core.brupdate, ssq(i).bits.uop))
+      {
+        ssq(i).valid           := false.B
+				ssq(i).bits.state			 := s_init
+				printf("[%d] Misprediction inits ssq(%d)\n", io.core.tsc_reg, i.U)
+      }
+    }
+  }
+
+  // Kill SCQ entries
+  val sc_brkilled_mask = Wire(Vec(numScqEntries, Bool()))
+  for (i <- 0 until numScqEntries)
+  {
+    sc_brkilled_mask(i) := false.B
+
+    when (scq(i).valid)
+    {
+      scq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, scq(i).bits.uop.br_mask)
+
+      when (IsKilledByBranch(io.core.brupdate, scq(i).bits.uop))
+      {
+        scq(i).valid           := false.B
+        sc_brkilled_mask(i)    := true.B
+				scq(i).bits.data.valid := false.B
+				scq(i).bits.state			 := s_init
+				printf("[%d] Misprediction inits scq(%d)\n", io.core.tsc_reg, i.U)
+      }
+    }
+
+    //assert (!(IsKilledByBranch(io.core.brupdate, scq(i).bits.uop) && scq(i).valid && scq(i).bits.committed),
+    //  "Branch is trying to clear a committed store check.")
+  }
+  //yh+end
 
   //-------------------------------------------------------------
   when (io.core.brupdate.b2.mispredict && !io.core.exception)
   {
     stq_tail := io.core.brupdate.b2.uop.stq_idx
     ldq_tail := io.core.brupdate.b2.uop.ldq_idx
+
+    //yh+begin
+    slq_tail := io.core.brupdate.b2.uop.slq_idx
+    ssq_tail := io.core.brupdate.b2.uop.ssq_idx
+    scq_tail := io.core.brupdate.b2.uop.scq_idx
+
+		printf("[%d] Misprediction occurred stq_idx: %d ldq_idx: %d slq_idx: %d ssq_idx: %d scq_idx: %d\n",
+						io.core.tsc_reg, io.core.brupdate.b2.uop.stq_idx,
+						io.core.brupdate.b2.uop.ldq_idx,
+            io.core.brupdate.b2.uop.slq_idx,
+            io.core.brupdate.b2.uop.ssq_idx,
+            io.core.brupdate.b2.uop.scq_idx)
+    //yh+end
   }
 
   //-------------------------------------------------------------
@@ -1448,14 +2780,26 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   var temp_stq_commit_head = stq_commit_head
   var temp_ldq_head        = ldq_head
+	//yh+begin
+  var temp_num_store = num_store
+  var temp_num_load = num_load
+	//yh+end
   for (w <- 0 until coreWidth)
   {
-    val commit_store = io.core.commit.valids(w) && io.core.commit.uops(w).uses_stq
+    //yh-val commit_store = io.core.commit.valids(w) && io.core.commit.uops(w).uses_stq
+    //yh+begin
+    val commit_store = (io.core.commit.valids(w) && io.core.commit.uops(w).uses_stq &&
+                        !io.core.commit.uops(w).is_cap)
+    //yh+end
     val commit_load  = io.core.commit.valids(w) && io.core.commit.uops(w).uses_ldq
     val idx = Mux(commit_store, temp_stq_commit_head, temp_ldq_head)
     when (commit_store)
     {
       stq(idx).bits.committed := true.B
+      //yh+begin
+      assert(!io.core.commit.uops(w).is_cap)
+      printf("[%d] Commit stq(%d)\n", io.core.tsc_reg, idx)
+      //yh+end
     } .elsewhen (commit_load) {
       assert (ldq(idx).valid, "[lsu] trying to commit an un-allocated load entry.")
       assert ((ldq(idx).bits.executed || ldq(idx).bits.forward_std_val) && ldq(idx).bits.succeeded ,
@@ -1467,7 +2811,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(idx).bits.succeeded        := false.B
       ldq(idx).bits.order_fail       := false.B
       ldq(idx).bits.forward_std_val  := false.B
-
+			//yh+begin
+      printf("[%d] Commit ldq(%d)\n", io.core.tsc_reg, idx)
+			//yh+end
     }
 
     if (MEMTRACE_PRINTF) {
@@ -1488,9 +2834,52 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     temp_ldq_head        = Mux(commit_load,
                                WrapInc(temp_ldq_head, numLdqEntries),
                                temp_ldq_head)
+
+		//yh+begin
+		temp_num_store = Mux(enableStat & commit_store, temp_num_store + 1.U, temp_num_store)
+		temp_num_load = Mux(enableStat & commit_load, temp_num_load + 1.U, temp_num_load)
+		when (commit_store || commit_load) {
+			printf("[%d] temp_num_load: %x\n", io.core.tsc_reg, temp_num_load)
+		}
+		//yh+end
   }
   stq_commit_head := temp_stq_commit_head
   ldq_head        := temp_ldq_head
+
+  //yh+begin
+  num_store := Mux(initStat, io.core.dpt_csrs.num_store, temp_num_store)
+  num_load := Mux(initStat, io.core.dpt_csrs.num_load, temp_num_load)
+
+  for (i <- 0 until numSlqEntries) {
+    when (slq(i).valid && slq(i).bits.uop.rob_idx === io.core.rob_head_idx) {
+      slq(i).bits.is_rob_head := true.B
+
+      when (!slq(i).bits.is_rob_head) {
+        printf("[%d] Set slq(%d) is_rob_head\n", io.core.tsc_reg, i.U)
+      }
+    }
+  }
+
+  for (i <- 0 until numSsqEntries) {
+    when (ssq(i).valid && ssq(i).bits.uop.rob_idx === io.core.rob_head_idx) {
+      ssq(i).bits.is_rob_head := true.B
+
+      when (!ssq(i).bits.is_rob_head) {
+        printf("[%d] Set ssq(%d) is_rob_head\n", io.core.tsc_reg, i.U)
+      }
+    }
+  }
+  
+  for (i <- 0 until numScqEntries) {
+    when (scq(i).valid && scq(i).bits.uop.rob_idx === io.core.rob_head_idx) {
+      scq(i).bits.is_rob_head := true.B
+
+      when (!scq(i).bits.is_rob_head) {
+        printf("[%d] Set scq(%d) is_rob_head\n", io.core.tsc_reg, i.U)
+      }
+    }
+  }
+  //yh+end
 
   // store has been committed AND successfully sent data to memory
   when (stq(stq_head).valid && stq(stq_head).bits.committed)
@@ -1501,6 +2890,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     }
     clear_store := Mux(stq(stq_head).bits.uop.is_fence, io.dmem.ordered,
                                                         stq(stq_head).bits.succeeded)
+		//yh+begin
+		when (clear_store) {
+			printf("[%d] Clear store stq(%d), rob(%d)\n", io.core.tsc_reg, stq_head, stq(stq_head).bits.uop.rob_idx)
+		}
+		//yh+end
   }
 
   when (clear_store)
@@ -1518,6 +2912,103 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     }
   }
 
+	//yh+begin
+  var temp_slq_head = slq_head
+  var temp_ssq_head = ssq_head
+
+  var temp_num_tagged_load = num_tagged_load
+  var temp_num_load_hit = num_load_hit
+  var temp_num_tagged_store = num_tagged_store
+  var temp_num_store_hit = num_store_hit
+  var temp_num_slq_itr = num_slq_itr
+  var temp_num_ssq_itr = num_ssq_itr
+
+  for (w <- 0 until coreWidth)
+  {
+	  val commit_ldchk = (io.core.commit.valids(w) && io.core.commit.uops(w).uses_ldq &&
+                        io.core.commit.uops(w).needCC)
+
+		when (commit_ldchk) {
+      assert (slq(temp_slq_head).valid, "[lsu] trying to commit an un-allocated SLQ entry.")
+      assert (slq(temp_slq_head).bits.state === s_done,
+							"[lsu] trying to commit an un-executed SLQ entry.")
+
+      slq(temp_slq_head).valid      := false.B
+      slq(temp_slq_head).bits.state	:= s_init
+      printf("[%d] Commit slq(%d) num_ways: %d count: %d\n",
+							io.core.tsc_reg, temp_slq_head, slq(temp_slq_head).bits.num_ways, slq(temp_slq_head).bits.count)
+		}
+
+		temp_num_tagged_load = Mux(enableStat & commit_ldchk & slq(temp_slq_head).bits.tagged,
+															temp_num_tagged_load + 1.U, temp_num_tagged_load)
+		temp_num_load_hit = Mux(enableStat & commit_ldchk & slq(temp_slq_head).bits.ccache_hit,
+															temp_num_load_hit + 1.U, temp_num_load_hit)
+		temp_num_slq_itr = Mux(enableStat & commit_ldchk & slq(temp_slq_head).bits.tagged,
+															temp_num_slq_itr + (slq(temp_slq_head).bits.num_ways - slq(temp_slq_head).bits.count),
+															temp_num_slq_itr)
+    temp_slq_head        = Mux(commit_ldchk, WrapInc(temp_slq_head, numSlqEntries), temp_slq_head)
+
+    val commit_stchk = (io.core.commit.valids(w) && io.core.commit.uops(w).uses_stq &&
+                        io.core.commit.uops(w).needCC && !io.core.commit.uops(w).is_cap)
+
+		when (commit_stchk) {
+      assert (ssq(temp_ssq_head).valid, "[lsu] trying to commit an un-allocated SSQ entry.")
+      assert (ssq(temp_ssq_head).bits.state === s_done,
+							"[lsu] trying to commit an un-executed SSQ entry.")
+
+      ssq(temp_ssq_head).valid      := false.B
+      ssq(temp_ssq_head).bits.state	:= s_init
+      printf("[%d] Commit ssq(%d) num_ways: %d count: %d\n",
+							io.core.tsc_reg, temp_ssq_head, ssq(temp_ssq_head).bits.num_ways, ssq(temp_ssq_head).bits.count)
+		}
+
+		temp_num_tagged_store = Mux(enableStat & commit_stchk & ssq(temp_ssq_head).bits.tagged,
+																temp_num_tagged_store + 1.U, temp_num_tagged_store)
+		temp_num_store_hit 		= Mux(enableStat & commit_stchk & ssq(temp_ssq_head).bits.ccache_hit,
+																temp_num_store_hit + 1.U, temp_num_store_hit)
+		temp_num_ssq_itr = Mux(enableStat & commit_stchk & ssq(temp_ssq_head).bits.tagged,
+															temp_num_ssq_itr + (ssq(temp_ssq_head).bits.num_ways - ssq(temp_ssq_head).bits.count),
+															temp_num_ssq_itr)
+    temp_ssq_head         = Mux(commit_stchk, WrapInc(temp_ssq_head, numSsqEntries), temp_ssq_head)
+	}
+
+	slq_head := temp_slq_head
+	ssq_head := temp_ssq_head
+
+  num_tagged_load := Mux(initStat, io.core.dpt_csrs.num_tagged_load, temp_num_tagged_load)
+  num_tagged_store := Mux(initStat, io.core.dpt_csrs.num_tagged_store, temp_num_tagged_store)
+  num_load_hit := Mux(initStat, io.core.dpt_csrs.num_load_hit, temp_num_load_hit)
+  num_store_hit := Mux(initStat, io.core.dpt_csrs.num_store_hit, temp_num_store_hit)
+  num_slq_itr := Mux(initStat, io.core.dpt_csrs.num_slq_itr, temp_num_slq_itr)
+  num_ssq_itr := Mux(initStat, io.core.dpt_csrs.num_ssq_itr, temp_num_ssq_itr)
+
+	when (update_shb_valid(0)) {
+    //val tidx = update_hb_tag(0)(tagWidth/2-1,0)
+    val tidx = update_hb_tag(0)
+		val way = update_hb_way(0)
+
+		//shb_meta(tidx) := update_hb_tag(0)(tagWidth-1,tagWidth/2)
+		shb_data(tidx) := way
+		printf("[%d] Update SHB[%x]: %d\n", io.core.tsc_reg, tidx, way)
+	}
+
+	//when (update_chb_valid(0)) {
+  //  val tidx = update_hb_tag(0)(tagWidth/2-1,0)
+	//	//TODO val way = WrapIncOrDecWay(update_hb_dir(0), update_hb_way(0), num_ways)
+	//	val way = update_hb_way(0)
+
+	//	chb_meta(tidx) := update_hb_tag(0)(tagWidth-1,tagWidth/2)
+	//	chb_data(tidx) := way
+	//	printf("[%d] Update CHB[%x]: %d\n", io.core.tsc_reg, tidx, way)
+	//}
+
+	when (enableDPT) {
+		printf("[%d] slq_head: %d slq_tail: %d ssq_head: %d ssq_tail: %d scq_head: %d scq_tail: %d\n",
+						io.core.tsc_reg, slq_head, slq_tail, ssq_head, ssq_tail, scq_head, scq_tail)
+		printf("[%d] ldq_head: %d ldq_tail: %d stq_head: %d stq_tail: %d\n",
+						io.core.tsc_reg, ldq_head, ldq_tail, stq_head, stq_tail)
+	}
+  //yh+end
 
   // -----------------------
   // Hellacache interface
@@ -1613,6 +3104,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         stq(i).bits.addr.valid := false.B
         stq(i).bits.data.valid := false.B
         stq(i).bits.uop        := NullMicroOp
+
+				//yh+begin
+				printf("[%d] Reset inits stq(%d)\n", io.core.tsc_reg, i.U)
+				//yh+end
       }
     }
       .otherwise // exception
@@ -1627,6 +3122,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
           stq(i).bits.addr.valid := false.B
           stq(i).bits.data.valid := false.B
           st_exc_killed_mask(i)  := true.B
+
+					//yh+begin
+					printf("[%d] Exception inits stq(%d)\n", io.core.tsc_reg, i.U)
+					//yh+end
         }
       }
     }
@@ -1636,8 +3135,44 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(i).valid           := false.B
       ldq(i).bits.addr.valid := false.B
       ldq(i).bits.executed   := false.B
+
+      //yh+begin
+      printf("[%d] Exception inits ldq(%d)\n", io.core.tsc_reg, i.U)
+      //yh+end
     }
   }
+
+  //yh+begin
+  when (reset.asBool || io.core.exception) {
+		slq_head := 0.U
+		slq_tail := 0.U
+
+		for (i <- 0 until numSlqEntries) {
+			slq(i).valid           := false.B
+			slq(i).bits.state			 := s_init
+			printf("[%d] Reset inits slq(%d)\n", io.core.tsc_reg, i.U)
+		}
+
+		ssq_head := 0.U
+		ssq_tail := 0.U
+
+		for (i <- 0 until numSsqEntries) {
+			ssq(i).valid           := false.B
+			ssq(i).bits.state			 := s_init
+			printf("[%d] Reset inits ssq(%d)\n", io.core.tsc_reg, i.U)
+		}
+
+		scq_head := 0.U
+		scq_tail := 0.U
+
+		for (i <- 0 until numScqEntries) {
+			scq(i).valid           := false.B
+			scq(i).bits.data.valid := false.B
+			scq(i).bits.state			 := s_init
+			printf("[%d] Reset inits scq(%d)\n", io.core.tsc_reg, i.U)
+		}
+  }
+  //yh+end
 
   //-------------------------------------------------------------
   // Live Store Mask
@@ -1649,7 +3184,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                     ~(st_brkilled_mask.asUInt) &
                     ~(st_exc_killed_mask.asUInt)
 
+  //yh+begin
+  live_tag_mask := Mux(reset.asBool || io.core.exception, 0.U,
+										(next_live_tag_mask &
+                    ~(sc_brkilled_mask.asUInt))) //TODO can remove sc_exc?
 
+	// Init all buffers upon context switch
+	for (i <- 0 until 256) {
+		when (initDPT) {
+			//shb_meta(i) := 0.U
+			shb_data(i) := 0.U
+			//chb_meta(i) := 0.U
+			//chb_data(i) := 0.U
+			ccache_meta(i) := 0.U
+			ccache_lbnd(i) := 0.U
+			ccache_ubnd(i) := 0.U
+		}
+	}
+  //yh+end
 }
 
 /**

@@ -126,6 +126,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
                  !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2))// Always accept secondary misses
 
   val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
+  //val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => (u.uses_ldq || u.is_capld), false)) //yh+
   rpq.io.brupdate := io.brupdate
   rpq.io.flush  := io.exception
   assert(!(state === s_invalid && !rpq.io.empty))
@@ -264,6 +265,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.resp.valid     := rpq.io.deq.valid && io.lb_read.fire && drain_load
     io.resp.bits.uop  := rpq.io.deq.bits.uop
     io.resp.bits.data := loadgen.data
+    io.resp.bits.dataBeats := data //yh+
     io.resp.bits.is_hella := rpq.io.deq.bits.is_hella
     when (rpq.io.deq.fire) {
       commit_line   := true.B
@@ -450,6 +452,7 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
   io.resp.valid     := (state === s_resp) && send_resp
   io.resp.bits.uop  := req.uop
   io.resp.bits.data := loadgen.data
+  io.resp.bits.dataBeats := grant_word //yh+
 
   when (io.req.fire) {
     req   := io.req.bits
@@ -735,6 +738,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   TLArbiter.lowestFromSeq(edge, io.mem_finish,  mshrs.map(_.io.mem_finish))
 
   val respq = Module(new BranchKillableQueue(new BoomDCacheResp, 4, u => u.uses_ldq, flow = false))
+  //val respq = Module(new BranchKillableQueue(new BoomDCacheResp, 4, u => (u.uses_ldq || u.is_capld), flow = false)) //yh+
   respq.io.brupdate := io.brupdate
   respq.io.flush    := io.exception
   respq.io.enq      <> resp_arb.io.out

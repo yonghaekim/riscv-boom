@@ -121,6 +121,12 @@ trait ScalarOpConstants
   val RT_PAS   = 3.U(2.W) // pass-through (prs1 := lrs1, etc)
   val RT_X     = 2.U(2.W) // not-a-register (but shouldn't get a busy-bit, etc.)
                              // TODO rename RT_NAR
+	//yh+begin
+	val CAP_LD = 0.U(2.W) // load
+	val CAP_ST = 1.U(2.W) // store
+	val CAP_CS = 2.U(2.W) // cstr
+	val CAP_CC = 3.U(2.W) // cclr
+	//yh+end
 
   // Micro-op opcodes
   // TODO change micro-op opcodes into using enum
@@ -202,9 +208,9 @@ trait ScalarOpConstants
   //               =  66.U(UOPC_SZ.W)
   val uopAMO_AG    =  67.U(UOPC_SZ.W) // AMO-address gen (use normal STD for datagen)
 
-  val uopFMV_W_X   =  68.U(UOPC_SZ.W)
+  val uopFMV_S_X   =  68.U(UOPC_SZ.W)
   val uopFMV_D_X   =  69.U(UOPC_SZ.W)
-  val uopFMV_X_W   =  70.U(UOPC_SZ.W)
+  val uopFMV_X_S   =  70.U(UOPC_SZ.W)
   val uopFMV_X_D   =  71.U(UOPC_SZ.W)
 
   val uopFSGNJ_S   =  72.U(UOPC_SZ.W)
@@ -258,6 +264,12 @@ trait ScalarOpConstants
 
   val uopMOV       = 109.U(UOPC_SZ.W) // conditional mov decoded from "add rd, x0, rs2"
 
+  //yh+begin
+  val uopTAGD      = 120.U(UOPC_SZ.W) 
+  val uopAUTD      = 121.U(UOPC_SZ.W) 
+  val uopXTAG      = 122.U(UOPC_SZ.W)
+  //yh+end
+
   // The Bubble Instruction (Machine generated NOP)
   // Insert (XOR x0,x0,x0) which is different from software compiler
   // generated NOPs which are (ADDI x0, x0, 0).
@@ -275,6 +287,12 @@ trait ScalarOpConstants
     uop.uses_ldq   := false.B
     uop.pdst       := 0.U
     uop.dst_rtype  := RT_X
+    //yh+begin
+    uop.needCC 		 := false.B
+    uop.is_cap	   := false.B
+		uop.cap_cmd    := 0.U
+    uop.is_bmm	   := false.B
+    //yh+end
 
     val cs = Wire(new boom.common.CtrlSignals())
     cs             := DontCare // Overridden in the following lines

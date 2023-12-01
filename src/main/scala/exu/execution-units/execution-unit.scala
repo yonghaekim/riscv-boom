@@ -136,6 +136,10 @@ abstract class ExecutionUnit(
 
     // TODO move this out of ExecutionUnit
     val com_exception = if (hasMem || hasRocc) Input(Bool()) else null
+    //yh+begin
+    val lsu_cap_io = if (hasMem) Flipped(new boom.lsu.LSUCapExeIO) else null
+    val dpt_csrs = if(hasMem) Input(new DptCSRs()) else null
+    //yh+end
   })
 
   if (writesIrf)   {
@@ -378,13 +382,18 @@ class ALUExeUnit(
     require(!hasAlu)
     val maddrcalc = Module(new MemAddrCalcUnit)
     maddrcalc.io.req        <> io.req
-    maddrcalc.io.req.valid  := io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+    //yh-maddrcalc.io.req.valid  := io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+    //yh+begin
+    maddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+                                && !io.req.bits.uop.is_cap) // except cstr, cclr
+    //yh+end
     maddrcalc.io.brupdate     <> io.brupdate
     maddrcalc.io.status     := io.status
     maddrcalc.io.bp         := io.bp
     maddrcalc.io.mcontext   := io.mcontext
     maddrcalc.io.scontext   := io.scontext
     maddrcalc.io.resp.ready := DontCare
+    maddrcalc.io.dpt_csrs := io.dpt_csrs //yh+
     require(numBypassStages == 0)
 
     io.lsu_io.req := maddrcalc.io.resp
@@ -393,6 +402,19 @@ class ALUExeUnit(
     if (usingFPU) {
       io.ll_fresp <> io.lsu_io.fresp
     }
+
+    //yh+begin
+    val caddrcalc = Module(new CapAddrCalcUnit)
+    caddrcalc.io.req        <> io.req
+    caddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)
+                                && io.req.bits.uop.needCC)
+    caddrcalc.io.brupdate   <> io.brupdate
+    caddrcalc.io.resp.ready := DontCare
+    caddrcalc.io.cap_resp.ready := DontCare
+    caddrcalc.io.dpt_csrs := io.dpt_csrs
+
+    io.lsu_cap_io.cap_req := caddrcalc.io.cap_resp
+    //yh+end
   }
 
   // Outputs (Write Port #0)  ---------------

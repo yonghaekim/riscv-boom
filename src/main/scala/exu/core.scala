@@ -238,6 +238,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     mem_units(i).io.lsu_io <> io.lsu.exe(i)
   }
 
+
   //-------------------------------------------------------------
   // Uarch Hardware Performance Events (HPEs)
 
@@ -497,6 +498,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
 
   //-------------------------------------------------------------
   // Decoders
+	//yh+begin
+	val user_priv = Reg(Bool())
+	user_priv := (csr.io.status.prv === 0.U /* User Priv */ ||
+								csr.io.status.prv === 3.U /* Machine Priv */)
+	//yh+end
 
   for (w <- 0 until coreWidth) {
     dec_valids(w)                      := io.ifu.fetchpacket.valid && dec_fbundle.uops(w).valid &&
@@ -506,6 +512,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     decode_units(w).io.csr_decode      <> csr.io.decode(w)
     decode_units(w).io.interrupt       := csr.io.interrupt
     decode_units(w).io.interrupt_cause := csr.io.interrupt_cause
+		decode_units(w).io.enableDPT			 := (user_priv && custom_csrs.dpt_config(62)) //yh+
 
     dec_uops(w) := decode_units(w).io.deq.uop
   }
@@ -691,7 +698,13 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
                       (  !rob.io.ready
                       || ren_stalls(w)
                       || io.lsu.ldq_full(w) && dis_uops(w).uses_ldq
-                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      //yh-|| io.lsu.stq_full(w) && dis_uops(w).uses_stq
+                      || io.lsu.stq_full(w) && dis_uops(w).uses_stq && !dis_uops(w).is_cap //yh+
+                      //yh+begin
+                      || io.lsu.slq_full(w) && dis_uops(w).uses_ldq && dis_uops(w).needCC
+                      || io.lsu.ssq_full(w) && dis_uops(w).uses_stq && dis_uops(w).needCC && !dis_uops(w).is_cap
+                      || io.lsu.scq_full(w) && dis_uops(w).is_cap // cstr, cclr
+                      //yh+end
                       || !dispatcher.io.ren_uops(w).ready
                       || wait_for_empty_pipeline(w)
                       || wait_for_rocc(w)
@@ -715,6 +728,11 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
     // Dispatching instructions request load/store queue entries when they can proceed.
     dis_uops(w).ldq_idx := io.lsu.dis_ldq_idx(w)
     dis_uops(w).stq_idx := io.lsu.dis_stq_idx(w)
+    //yh+begin
+    dis_uops(w).slq_idx := io.lsu.dis_slq_idx(w)
+    dis_uops(w).ssq_idx := io.lsu.dis_ssq_idx(w)
+    dis_uops(w).scq_idx := io.lsu.dis_scq_idx(w)
+    //yh+end
   }
 
   //-------------------------------------------------------------
@@ -1023,10 +1041,32 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
       Causes.fetch_access.U,
       Causes.load_page_fault.U,
       Causes.store_page_fault.U,
-      Causes.fetch_page_fault.U)
+      //yh-Causes.fetch_page_fault.U)
+			//yh+begin
+      Causes.fetch_page_fault.U,
+      Causes.ldchk_fault.U,
+      Causes.stchk_fault.U,
+      Causes.cstr_fault.U,
+      Causes.cclr_fault.U)
+			//yh+end
 
   csr.io.tval := Mux(tval_valid,
     RegNext(encodeVirtualAddress(rob.io.com_xcpt.bits.badvaddr, rob.io.com_xcpt.bits.badvaddr)), 0.U)
+
+  //yh+begin
+  when (tval_valid) {
+    printf("[%d] Found tval_valid at core\n", debug_tsc_reg)
+    when (csr.io.cause === Causes.ldchk_fault.U) {
+      printf("[%d] Found ldchk_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
+    } .elsewhen (csr.io.cause === Causes.stchk_fault.U) {
+      printf("[%d] Found stchk_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
+    } .elsewhen (csr.io.cause === Causes.cstr_fault.U) {
+      printf("[%d] Found cstr_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
+    } .elsewhen (csr.io.cause === Causes.cclr_fault.U) {
+      printf("[%d] Found cclr_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
+    }
+  }
+  //yh+end
 
   // TODO move this function to some central location (since this is used elsewhere).
   def encodeVirtualAddress(a0: UInt, ea: UInt) =
@@ -1282,6 +1322,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   rob.io.lsu_clr_bsy    := io.lsu.clr_bsy
   rob.io.lsu_clr_unsafe := io.lsu.clr_unsafe
   rob.io.lxcpt          <> io.lsu.lxcpt
+  rob.io.lsu_clr_needCC := io.lsu.clr_needCC //yh+
 
   assert (!(csr.io.singleStep), "[core] single-step is unsupported.")
 
@@ -1316,11 +1357,100 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
         reset.asBool) {
     idle_cycles := 0.U
   }
+
   assert (!(idle_cycles.value(13)), "Pipeline has hung.")
 
   if (usingFPU) {
     fp_pipeline.io.debug_tsc_reg := debug_tsc_reg
   }
+
+  //yh+begin
+  val dpt_csrs = Reg(new DptCSRs)
+  dpt_csrs.arena_end_0 := custom_csrs.arena_end_0
+  dpt_csrs.arena_end_1 := custom_csrs.arena_end_1
+  dpt_csrs.arena_end_2 := custom_csrs.arena_end_2
+  dpt_csrs.arena_end_3 := custom_csrs.arena_end_3
+  dpt_csrs.arena_end_4 := custom_csrs.arena_end_4
+  dpt_csrs.arena_end_5 := custom_csrs.arena_end_5
+  dpt_csrs.arena_end_6 := custom_csrs.arena_end_6
+  dpt_csrs.arena_end_7 := custom_csrs.arena_end_7
+
+  dpt_csrs.num_ways_0 := custom_csrs.num_ways_0
+  dpt_csrs.num_ways_1 := custom_csrs.num_ways_1
+  dpt_csrs.num_ways_2 := custom_csrs.num_ways_2
+  dpt_csrs.num_ways_3 := custom_csrs.num_ways_3
+
+  dpt_csrs.cmt_base := custom_csrs.dpt_config(vaddrBits-1,0)
+  dpt_csrs.cmt_size_offset := custom_csrs.dpt_config(55,48)
+  dpt_csrs.wpb_base := custom_csrs.wpb_base(vaddrBits-1,0)
+
+  for (i <- 0 until memWidth) {
+    mem_units(i).io.lsu_cap_io <> io.lsu.cap_exe(i)
+    mem_units(i).io.dpt_csrs := dpt_csrs
+  }
+
+  // CSRs (<=> ROB)
+  rob.io.dpt_csrs.enableStat          := custom_csrs.dpt_config(61)
+  rob.io.dpt_csrs.num_tagd   			    := custom_csrs.num_tagd
+  rob.io.dpt_csrs.num_xtag   			    := custom_csrs.num_xtag
+  rob.io.dpt_csrs.num_inst   			    := custom_csrs.num_inst
+
+  csr.io.num_tagd                     := rob.io.num_tagd
+  csr.io.num_xtag                     := rob.io.num_xtag
+  csr.io.num_inst                     := rob.io.num_inst
+
+  // CSRs (<=> LSU)
+  io.lsu.dpt_csrs.enableDPT         	:= custom_csrs.dpt_config(62)
+  io.lsu.dpt_csrs.enableStat          := custom_csrs.dpt_config(61)
+  io.lsu.dpt_csrs.disableSpec         := custom_csrs.dpt_config(60)
+  io.lsu.dpt_csrs.suppressFault       := custom_csrs.dpt_config(59)
+  io.lsu.dpt_csrs.ignoreDepMask       := custom_csrs.dpt_config(58)
+  io.lsu.dpt_csrs.cmt_base         		:= custom_csrs.dpt_config(47,0)
+  //io.lsu.dpt_csrs.num_ways         		:= custom_csrs.dpt_config(59,48)
+  io.lsu.dpt_csrs.num_store   	      := custom_csrs.num_store
+  io.lsu.dpt_csrs.num_load   	        := custom_csrs.num_load
+  io.lsu.dpt_csrs.num_tagged_store   	:= custom_csrs.num_tagged_store
+  io.lsu.dpt_csrs.num_tagged_load   	:= custom_csrs.num_tagged_load
+  io.lsu.dpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
+  io.lsu.dpt_csrs.bounds_traffic     	:= custom_csrs.bounds_traffic
+  io.lsu.dpt_csrs.num_store_hit   		:= custom_csrs.num_store_hit
+  io.lsu.dpt_csrs.num_load_hit   			:= custom_csrs.num_load_hit
+  io.lsu.dpt_csrs.num_cstr   			    := custom_csrs.num_cstr
+  io.lsu.dpt_csrs.num_cclr   			    := custom_csrs.num_cclr
+  io.lsu.dpt_csrs.bounds_margin       := custom_csrs.bounds_margin
+  io.lsu.dpt_csrs.num_slq_itr   			:= custom_csrs.num_slq_itr
+  io.lsu.dpt_csrs.num_ssq_itr   			:= custom_csrs.num_ssq_itr
+  io.lsu.dpt_csrs.num_scq_itr   			:= custom_csrs.num_scq_itr
+
+  csr.io.dpt_config       	:= custom_csrs.dpt_config
+  csr.io.wpb_base       		:= custom_csrs.wpb_base
+  csr.io.num_store          := io.lsu.num_store
+  csr.io.num_load           := io.lsu.num_load
+  csr.io.num_tagged_store   := io.lsu.num_tagged_store
+  csr.io.num_tagged_load    := io.lsu.num_tagged_load
+  csr.io.ldst_traffic       := io.lsu.ldst_traffic
+  csr.io.bounds_traffic     := io.lsu.bounds_traffic
+  csr.io.num_store_hit    	:= io.lsu.num_store_hit
+  csr.io.num_load_hit    		:= io.lsu.num_load_hit
+  csr.io.num_cstr           := io.lsu.num_cstr
+  csr.io.num_cclr           := io.lsu.num_cclr
+  csr.io.bounds_margin      := custom_csrs.bounds_margin
+  csr.io.arena_end_0        := custom_csrs.arena_end_0
+  csr.io.arena_end_1        := custom_csrs.arena_end_1
+  csr.io.arena_end_2        := custom_csrs.arena_end_2
+  csr.io.arena_end_3        := custom_csrs.arena_end_3
+  csr.io.arena_end_4        := custom_csrs.arena_end_4
+  csr.io.arena_end_5        := custom_csrs.arena_end_5
+  csr.io.arena_end_6        := custom_csrs.arena_end_6
+  csr.io.arena_end_7        := custom_csrs.arena_end_7
+  csr.io.num_ways_0         := custom_csrs.num_ways_0
+  csr.io.num_ways_1         := custom_csrs.num_ways_1
+  csr.io.num_ways_2         := custom_csrs.num_ways_2
+  csr.io.num_ways_3         := custom_csrs.num_ways_3
+  csr.io.num_slq_itr        := io.lsu.num_slq_itr
+  csr.io.num_ssq_itr        := io.lsu.num_ssq_itr
+  csr.io.num_scq_itr        := io.lsu.num_scq_itr
+  //yh+end
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------
