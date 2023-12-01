@@ -637,7 +637,7 @@ class CapAddrCalcUnit(implicit p: Parameters)
 
   val arena_end = Wire(Vec(31, UInt(16.W)))
   val num_ways = Wire(Vec(32, UInt(8.W)))
-  val offset = Wire(Vec(32, UInt(vaddrBits.W)))
+  //val offset = Wire(Vec(32, UInt(vaddrBits.W)))
 
   for (i <- 0 until 4) {
     arena_end(i+ 0) := io.dpt_csrs.arena_end_0(16*(i+1)-1,16*i) 
