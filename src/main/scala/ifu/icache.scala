@@ -140,7 +140,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   // How many bits do we intend to fetch at most every cycle?
   val wordBits = outer.icacheParams.fetchBytes*8
-  //val wordBits = outer.icacheParams.fetchBytes*8*4 //yh+
   // Each of these cases require some special-case handling.
   require (tl_out.d.bits.data.getWidth == wordBits || (2*tl_out.d.bits.data.getWidth == wordBits && nBanks == 2))
   // If TL refill is half the wordBits size and we have two banks, then the
@@ -158,10 +157,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s1_hit = s1_tag_hit.reduce(_||_)
   val s2_valid = RegNext(s1_valid && !io.s1_kill)
   val s2_hit = RegNext(s1_hit)
-
-
-	//printf("tagBits: %d untagBits: %d blockOffBits: %d lgCacheBlockBytes: %d refillCycles: %d\n",
-	//				tagBits.asUInt, untagBits.asUInt, blockOffBits.asUInt, lgCacheBlockBytes.asUInt, refillCycles.asUInt) //yh+
 
   val invalidated = Reg(Bool())
   val refill_valid = RegInit(false.B)
@@ -330,7 +325,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       }
     }
   }
-	//val s2_beat_sel = RegNext(io.s1_paddr(blockOffBits-2,blockOffBits-3)) //yh+
+
   val s2_tag_hit = RegNext(s1_tag_hit)
   val s2_hit_way = OHToUInt(s2_tag_hit)
   val s2_bankid = RegNext(s1_bankid)
@@ -351,21 +346,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     }
 
   io.resp.bits.data := s2_data
-	////yh+begin
-  //io.resp.bits.data := Mux(s2_beat_sel === 3.U, s2_data(wordBits*4/4-1,wordBits*3/4),
-	//												Mux(s2_beat_sel === 2.U, s2_data(wordBits*3/4-1,wordBits*2/4),
-	//												Mux(s2_beat_sel === 1.U, s2_data(wordBits*2/4-1,wordBits*1/4),
-	//												s2_data(wordBits*1/4-1,0))))
-	////printf("s1_paddr: %x s2_beat_sel: %x resp.data: %x s2_data: %x\n",
-	////			RegNext(io.s1_paddr), s2_beat_sel, 
-	////			Mux(s2_beat_sel === 3.U, s2_data(wordBits*4/4-1,wordBits*3/4),
-	////					Mux(s2_beat_sel === 2.U, s2_data(wordBits*3/4-1,wordBits*2/4),
-	////					Mux(s2_beat_sel === 1.U, s2_data(wordBits*2/4-1,wordBits*1/4),
-	////					s2_data(wordBits*1/4-1,0))))
-	////			, s2_data)
-	////printf("s2_bankid: %x s2_bank0_data: %x s2_bank1_data: %x\n",
-	////				s2_bankid, s2_bank0_data, s2_bank1_data)
-	////yh+end
   io.resp.valid := s2_valid && s2_hit
 
   tl_out.a.valid := s2_miss && !refill_valid && !io.s2_kill

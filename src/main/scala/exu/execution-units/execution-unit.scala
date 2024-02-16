@@ -404,6 +404,9 @@ class ALUExeUnit(
     }
 
     //yh+begin
+    // Address calculation unit for capability instructions
+    // this can be integrated into existing memory adress calculation unit
+    // but we add a seperate unit for less complexity 
     val caddrcalc = Module(new CapAddrCalcUnit)
     caddrcalc.io.req        <> io.req
     caddrcalc.io.req.valid  := (io.req.valid && io.req.bits.uop.fu_code_is(FU_MEM)

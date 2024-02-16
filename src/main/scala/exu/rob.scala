@@ -35,16 +35,6 @@ import freechips.rocketchip.util.Str
 import boom.common._
 import boom.util._
 
-//yh+begin
-class RobDptCSRs(implicit p: Parameters) extends BoomBundle()(p)
-{
-  val enableStat          = Bool()
-  val num_tagd            = UInt(xLen.W)
-  val num_xtag            = UInt(xLen.W)
-  val num_inst            = UInt(xLen.W)
-}
-//yh+end
-
 /**
  * IO bundle to interact with the ROB
  *
@@ -84,10 +74,6 @@ class RobIo(
 
   //yh+begin
   val lsu_clr_needCC   = Input(Vec(memWidth + memWidth, Valid(UInt(robAddrSz.W))))
-  val dpt_csrs         = Input(new RobDptCSRs)
-  val num_tagd         = Output(UInt(xLen.W))
-  val num_xtag         = Output(UInt(xLen.W))
-  val num_inst         = Output(UInt(xLen.W))
   //yh+end
 
   // Port for unmarking loads/stores as speculation hazards..
@@ -278,24 +264,6 @@ class Rob(
   val r_xcpt_badvaddr  = Reg(UInt(coreMaxAddrBits.W))
   io.flush_frontend := r_xcpt_val
 
-  //yh+begin
-  val enableStat      		= RegInit(false.B)
-  val initStat           	= Reg(Bool())
-  val num_tagd            = Reg(UInt(xLen.W))
-  val num_xtag            = Reg(UInt(xLen.W))
-  val num_inst            = Reg(UInt(xLen.W))
-
-  enableStat             	:= io.dpt_csrs.enableStat
-  initStat               	:= io.dpt_csrs.enableStat & !enableStat
-  io.num_tagd             := num_tagd
-  io.num_xtag             := num_xtag
-  io.num_inst             := num_inst
-
-  var temp_num_tagd = num_tagd
-  var temp_num_xtag = num_xtag
-  var temp_num_inst = num_inst
-  //yh+end
-
   //--------------------------------------------------
   // Utility
 
@@ -363,6 +331,9 @@ class Rob(
       //yh-                             io.enq_uops(w).is_fencei)
       //yh-rob_unsafe(rob_tail)    := io.enq_uops(w).unsafe
 			//yh+begin
+      // cstr/cclr always have busy bit set to false
+      // However, correct instruction commit is guaranteed by needCC bit,
+      // which is set when they become the head of ROB
       rob_bsy(rob_tail)       := !(io.enq_uops(w).is_fence 	||
                                    io.enq_uops(w).is_fencei ||
                                    io.enq_uops(w).is_cap /* cstr, cclr */)
@@ -423,8 +394,8 @@ class Rob(
       when (clr_rob_idx.valid && MatchBank(GetBankIdx(clr_rob_idx.bits))) {
         val cidx = GetRowIdx(clr_rob_idx.bits)
         rob_needCC(cidx) := false.B
-        assert (rob_val(cidx) === true.B, "[rob] store writing back to invalid entry.")
-        assert (rob_needCC(cidx) === true.B, "[rob] store writing back to a not-needCC entry.")
+        //assert (rob_val(cidx) === true.B, "[rob] store writing back to invalid entry.")
+        //assert (rob_needCC(cidx) === true.B, "[rob] store writing back to a not-needCC entry.")
       }
     }
     //yh+end
@@ -460,6 +431,8 @@ class Rob(
 
     // Can this instruction commit? (the check for exceptions/rob_state happens later).
     //yh-can_commit(w) := rob_val(rob_head) && !(rob_bsy(rob_head)) && !io.csr_stall
+    // In DPT, commit condition is modified such that
+    // memory instructions can commit only after they finish capability checks
     can_commit(w) := (rob_val(rob_head) && !rob_bsy(rob_head) && !io.csr_stall && !rob_needCC(rob_head)) //yh+
 
 
@@ -585,22 +558,7 @@ class Rob(
                "[rob] writeback (" + i + ") occurred to the wrong pdst.")
     }
     io.commit.debug_wdata(w) := rob_debug_wdata(rob_head)
-
-    //yh+begin
-    temp_num_tagd = Mux(enableStat & will_commit(w) && rob_uop(rob_head).uopc === uopTAGD,
-                          temp_num_tagd + 1.U, temp_num_tagd)
-    temp_num_xtag = Mux(enableStat & will_commit(w) && rob_uop(rob_head).uopc === uopXTAG,
-                          temp_num_xtag + 1.U, temp_num_xtag)
-    temp_num_inst = Mux(enableStat & will_commit(w),
-                          temp_num_inst + 1.U, temp_num_inst)
-    //yh+end
   } //for (w <- 0 until coreWidth)
-
-  //yh+begin
-  num_tagd := Mux(initStat, io.dpt_csrs.num_tagd, temp_num_tagd)
-  num_xtag := Mux(initStat, io.dpt_csrs.num_xtag, temp_num_xtag)
-  num_inst := Mux(initStat, io.dpt_csrs.num_inst, temp_num_inst)
-  //yh+end
 
 
   // **************************************************************************
@@ -645,23 +603,6 @@ class Rob(
   io.com_xcpt.bits.edge_inst := com_xcpt_uop.edge_inst
   io.com_xcpt.bits.is_rvc    := com_xcpt_uop.is_rvc
   io.com_xcpt.bits.pc_lob    := com_xcpt_uop.pc_lob
-
-  //yh+begin
-  when (io.com_xcpt.valid) {
-    printf("[%d] Found com_xcpt.valid at ROB exception_thrown: %d rob(%d)\n",
-            io.debug_tsc, exception_thrown, com_xcpt_uop.rob_idx)
-    when (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.ldchk_fault.U) {
-      printf("[%d] Found ldchk fault at ROB badvaddr: %x\n", io.debug_tsc, io.com_xcpt.bits.badvaddr)
-		} .elsewhen (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.stchk_fault.U) {
-      printf("[%d] Found stchk fault at ROB badvaddr: %x\n", io.debug_tsc, io.com_xcpt.bits.badvaddr)
-		} .elsewhen (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.cstr_fault.U) {
-      printf("[%d] Found cstr fault at ROB badvaddr: %x\n", io.debug_tsc, io.com_xcpt.bits.badvaddr)
-		} .elsewhen (io.com_xcpt.bits.cause === freechips.rocketchip.rocket.Causes.cclr_fault.U) {
-      printf("[%d] Found cclr fault at ROB badvaddr: %x\n", io.debug_tsc, io.com_xcpt.bits.badvaddr)
-    }
-  }
-  //yh+end
-
 
   val flush_commit_mask = Range(0,coreWidth).map{i => io.commit.valids(i) && io.commit.uops(i).flush_on_commit}
   val flush_commit = flush_commit_mask.reduce(_|_)

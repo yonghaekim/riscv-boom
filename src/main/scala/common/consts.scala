@@ -122,6 +122,7 @@ trait ScalarOpConstants
   val RT_X     = 2.U(2.W) // not-a-register (but shouldn't get a busy-bit, etc.)
                              // TODO rename RT_NAR
 	//yh+begin
+  // Capability opcodes to distinguish different memory req types
 	val CAP_LD = 0.U(2.W) // load
 	val CAP_ST = 1.U(2.W) // store
 	val CAP_CS = 2.U(2.W) // cstr
@@ -265,6 +266,7 @@ trait ScalarOpConstants
   val uopMOV       = 109.U(UOPC_SZ.W) // conditional mov decoded from "add rd, x0, rs2"
 
   //yh+begin
+  // Opcodes for pointer tagging instructions
   val uopTAGD      = 120.U(UOPC_SZ.W) 
   val uopAUTD      = 121.U(UOPC_SZ.W) 
   val uopXTAG      = 122.U(UOPC_SZ.W)

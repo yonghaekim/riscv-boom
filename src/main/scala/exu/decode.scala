@@ -471,7 +471,7 @@ object CAPDecode extends DecodeConstants
 	// Bit manipulation primitives
   BSETM   -> List(Y, N, X, uopAMO_AG, IQT_MEM, FU_MEM , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, Y, Y, N, N, M_XA_OR,  0.U, N, N, N, Y, Y, CSR.N),
   BCLRM   -> List(Y, N, X, uopAMO_AG, IQT_MEM, FU_MEM , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, Y, Y, N, N, M_XA_AND, 0.U, N, N, N, Y, Y, CSR.N),
-  BEXTM   -> List(Y, N, X, uopAMO_AG, IQT_MEM, FU_MEM , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, Y, Y, N, N, M_XA_XOR, 0.U, N, N, N, Y, Y, CSR.N),
+  BEXTM   -> List(Y, N, X, uopAMO_AG, IQT_MEM, FU_MEM , RT_FIX, RT_FIX, RT_FIX, N, IS_X, N, Y, Y, N, N, M_XA_BEXT,0.U, N, N, N, Y, Y, CSR.N),
   )
 }
 //yh+end
@@ -586,6 +586,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   //yh+begin
 	val is_cap = (inst(6,0) === BitPat("b0101011")) // cstr, cclr
   uop.is_cap := is_cap
+  // FIXME: set needCC for amo instructions
 	uop.needCC := (is_cap ||
 								(io.enableDPT && !cs.is_amo && !cs.is_fence &&
 								(cs.uses_ldq || cs.uses_stq) &&
@@ -595,29 +596,18 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
                     Mux(cs.uses_ldq, CAP_LD, CAP_ST)))
 	val is_bmm = (inst(6,0) === BitPat("b1111011")) // bsetm, bclrm, bextm
 	uop.is_bmm := is_bmm
-
-  when (is_cap) {
-    printf("Found is_cap in decode! mem_cmd: %d\n", cs.mem_cmd)
-  } .elsewhen (is_bmm) {
-    printf("Found is_bmm in decode! mem_cmd: %d\n", cs.mem_cmd)
-	}
-
-  when (cs.uopc === uopTAGD) {
-    printf("Found TAGD in decode!\n")
-  } .elsewhen (cs.uopc === uopXTAG) {
-    printf("Found XTAG in decode!\n")
-  } .elsewhen (cs.mem_cmd === M_XA_CSTR) {
-    printf("Found CSTR in decode!\n")
-  } .elsewhen (cs.mem_cmd === M_XA_CCLR) {
-    printf("Found CCLR in decode!\n")
-  }
   //yh+end
 
   uop.fp_val     := cs.fp_val
   uop.fp_single  := cs.fp_single // TODO use this signal instead of the FPU decode's table signal?
 
   uop.mem_cmd    := cs.mem_cmd
-  uop.mem_size   := Mux(cs.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL), Cat(uop.lrs2 =/= 0.U, uop.lrs1 =/= 0.U), inst(13,12))
+  //yh-uop.mem_size   := Mux(cs.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL), Cat(uop.lrs2 =/= 0.U, uop.lrs1 =/= 0.U), inst(13,12))
+  //yh+begin
+  uop.mem_size   := Mux(cs.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL),
+                        Cat(uop.lrs2 =/= 0.U, uop.lrs1 =/= 0.U),
+                        Mux(is_bmm, 3.U, inst(13,12)))
+  //yh+end
   uop.mem_signed := !inst(14)
   uop.uses_ldq   := cs.uses_ldq
   uop.uses_stq   := cs.uses_stq

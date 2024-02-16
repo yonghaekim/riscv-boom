@@ -499,6 +499,9 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   //-------------------------------------------------------------
   // Decoders
 	//yh+begin
+  // We add machine privilege here too since software test using Verilator
+  // operates in machine privilege, which we tested and verified our design with
+  // However, in actual deployment on FPGAs, DPT should be enabled only in user privilege
 	val user_priv = Reg(Bool())
 	user_priv := (csr.io.status.prv === 0.U /* User Priv */ ||
 								csr.io.status.prv === 3.U /* Machine Priv */)
@@ -1043,6 +1046,7 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
       Causes.store_page_fault.U,
       //yh-Causes.fetch_page_fault.U)
 			//yh+begin
+      // New exception classes for DPT
       Causes.fetch_page_fault.U,
       Causes.ldchk_fault.U,
       Causes.stchk_fault.U,
@@ -1052,21 +1056,6 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
 
   csr.io.tval := Mux(tval_valid,
     RegNext(encodeVirtualAddress(rob.io.com_xcpt.bits.badvaddr, rob.io.com_xcpt.bits.badvaddr)), 0.U)
-
-  //yh+begin
-  when (tval_valid) {
-    printf("[%d] Found tval_valid at core\n", debug_tsc_reg)
-    when (csr.io.cause === Causes.ldchk_fault.U) {
-      printf("[%d] Found ldchk_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
-    } .elsewhen (csr.io.cause === Causes.stchk_fault.U) {
-      printf("[%d] Found stchk_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
-    } .elsewhen (csr.io.cause === Causes.cstr_fault.U) {
-      printf("[%d] Found cstr_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
-    } .elsewhen (csr.io.cause === Causes.cclr_fault.U) {
-      printf("[%d] Found cclr_fault at core badvaddr: %x\n", debug_tsc_reg, rob.io.com_xcpt.bits.badvaddr)
-    }
-  }
-  //yh+end
 
   // TODO move this function to some central location (since this is used elsewhere).
   def encodeVirtualAddress(a0: UInt, ea: UInt) =
@@ -1379,61 +1368,31 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   dpt_csrs.num_ways_1 := custom_csrs.num_ways_1
   dpt_csrs.num_ways_2 := custom_csrs.num_ways_2
   dpt_csrs.num_ways_3 := custom_csrs.num_ways_3
+  dpt_csrs.num_ways_4 := custom_csrs.num_ways_0
+  dpt_csrs.num_ways_5 := custom_csrs.num_ways_1
+  dpt_csrs.num_ways_6 := custom_csrs.num_ways_2
+  dpt_csrs.num_ways_7 := custom_csrs.num_ways_3
 
   dpt_csrs.cmt_base := custom_csrs.dpt_config(vaddrBits-1,0)
-  dpt_csrs.cmt_size_offset := custom_csrs.dpt_config(55,48)
   dpt_csrs.wpb_base := custom_csrs.wpb_base(vaddrBits-1,0)
+  dpt_csrs.way_thres := custom_csrs.dpt_config(56,55)
+  dpt_csrs.max_num_ways := custom_csrs.dpt_config(53,48)
 
   for (i <- 0 until memWidth) {
     mem_units(i).io.lsu_cap_io <> io.lsu.cap_exe(i)
     mem_units(i).io.dpt_csrs := dpt_csrs
   }
 
-  // CSRs (<=> ROB)
-  rob.io.dpt_csrs.enableStat          := custom_csrs.dpt_config(61)
-  rob.io.dpt_csrs.num_tagd   			    := custom_csrs.num_tagd
-  rob.io.dpt_csrs.num_xtag   			    := custom_csrs.num_xtag
-  rob.io.dpt_csrs.num_inst   			    := custom_csrs.num_inst
-
-  csr.io.num_tagd                     := rob.io.num_tagd
-  csr.io.num_xtag                     := rob.io.num_xtag
-  csr.io.num_inst                     := rob.io.num_inst
-
   // CSRs (<=> LSU)
   io.lsu.dpt_csrs.enableDPT         	:= custom_csrs.dpt_config(62)
   io.lsu.dpt_csrs.enableStat          := custom_csrs.dpt_config(61)
   io.lsu.dpt_csrs.disableSpec         := custom_csrs.dpt_config(60)
   io.lsu.dpt_csrs.suppressFault       := custom_csrs.dpt_config(59)
-  io.lsu.dpt_csrs.ignoreDepMask       := custom_csrs.dpt_config(58)
   io.lsu.dpt_csrs.cmt_base         		:= custom_csrs.dpt_config(47,0)
-  //io.lsu.dpt_csrs.num_ways         		:= custom_csrs.dpt_config(59,48)
-  io.lsu.dpt_csrs.num_store   	      := custom_csrs.num_store
-  io.lsu.dpt_csrs.num_load   	        := custom_csrs.num_load
-  io.lsu.dpt_csrs.num_tagged_store   	:= custom_csrs.num_tagged_store
-  io.lsu.dpt_csrs.num_tagged_load   	:= custom_csrs.num_tagged_load
-  io.lsu.dpt_csrs.ldst_traffic       	:= custom_csrs.ldst_traffic
-  io.lsu.dpt_csrs.bounds_traffic     	:= custom_csrs.bounds_traffic
-  io.lsu.dpt_csrs.num_store_hit   		:= custom_csrs.num_store_hit
-  io.lsu.dpt_csrs.num_load_hit   			:= custom_csrs.num_load_hit
-  io.lsu.dpt_csrs.num_cstr   			    := custom_csrs.num_cstr
-  io.lsu.dpt_csrs.num_cclr   			    := custom_csrs.num_cclr
   io.lsu.dpt_csrs.bounds_margin       := custom_csrs.bounds_margin
-  io.lsu.dpt_csrs.num_slq_itr   			:= custom_csrs.num_slq_itr
-  io.lsu.dpt_csrs.num_ssq_itr   			:= custom_csrs.num_ssq_itr
-  io.lsu.dpt_csrs.num_scq_itr   			:= custom_csrs.num_scq_itr
 
   csr.io.dpt_config       	:= custom_csrs.dpt_config
   csr.io.wpb_base       		:= custom_csrs.wpb_base
-  csr.io.num_store          := io.lsu.num_store
-  csr.io.num_load           := io.lsu.num_load
-  csr.io.num_tagged_store   := io.lsu.num_tagged_store
-  csr.io.num_tagged_load    := io.lsu.num_tagged_load
-  csr.io.ldst_traffic       := io.lsu.ldst_traffic
-  csr.io.bounds_traffic     := io.lsu.bounds_traffic
-  csr.io.num_store_hit    	:= io.lsu.num_store_hit
-  csr.io.num_load_hit    		:= io.lsu.num_load_hit
-  csr.io.num_cstr           := io.lsu.num_cstr
-  csr.io.num_cclr           := io.lsu.num_cclr
   csr.io.bounds_margin      := custom_csrs.bounds_margin
   csr.io.arena_end_0        := custom_csrs.arena_end_0
   csr.io.arena_end_1        := custom_csrs.arena_end_1
@@ -1447,9 +1406,6 @@ class BoomCore(usingTrace: Boolean)(implicit p: Parameters) extends BoomModule
   csr.io.num_ways_1         := custom_csrs.num_ways_1
   csr.io.num_ways_2         := custom_csrs.num_ways_2
   csr.io.num_ways_3         := custom_csrs.num_ways_3
-  csr.io.num_slq_itr        := io.lsu.num_slq_itr
-  csr.io.num_ssq_itr        := io.lsu.num_ssq_itr
-  csr.io.num_scq_itr        := io.lsu.num_scq_itr
   //yh+end
 
   //-------------------------------------------------------------

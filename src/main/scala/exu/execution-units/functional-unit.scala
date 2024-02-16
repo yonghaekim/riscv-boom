@@ -119,11 +119,12 @@ class FuncUnitCapResp(val dataWidth: Int)(implicit p: Parameters) extends BoomBu
 {
 	val tag = UInt(tagWidth.W)
 	val tagged = Bool()
-	//val dir = Bool()
   val addr = UInt((vaddrBits+1).W)
   val data = UInt(vaddrBits.W)
   val cmt_addr = UInt(vaddrBits.W)
   val num_ways = UInt(wayAddrSz.W)
+  val start_way = UInt(wayAddrSz.W)
+  val idx = UInt(5.W)
 }
 
 class DptCSRs(implicit p: Parameters) extends BoomBundle
@@ -140,9 +141,14 @@ class DptCSRs(implicit p: Parameters) extends BoomBundle
   val num_ways_1 = UInt(xLen.W)
   val num_ways_2 = UInt(xLen.W)
   val num_ways_3 = UInt(xLen.W)
+  val num_ways_4 = UInt(xLen.W)
+  val num_ways_5 = UInt(xLen.W)
+  val num_ways_6 = UInt(xLen.W)
+  val num_ways_7 = UInt(xLen.W)
   val cmt_base = UInt(vaddrBits.W)
-  val cmt_size_offset = UInt(8.W)
 	val wpb_base = UInt(vaddrBits.W)
+	val way_thres = UInt(2.W)
+	val max_num_ways = UInt(6.W)
 }
 //yh+end
 
@@ -528,6 +534,8 @@ class MemAddrCalcUnit(implicit p: Parameters)
   //yh-val ea_sign = Mux(sum(vaddrBits-1), ~sum(63,vaddrBits) === 0.U,
   //yh-                                     sum(63,vaddrBits) =/= 0.U)
   //yh+begin
+  // High-order bit masking (63,vaddrBits)
+  // similar to Arm's top-byte-ignore (TBI) and Intel's linear address masking (LAM)
 	assert (!(io.req.valid && io.req.bits.uop.is_cap))
   val ea_sign = Mux(sum(vaddrBits-1), ~sum(xLen-tagWidth-1,vaddrBits) === 0.U,
                                        sum(xLen-tagWidth-1,vaddrBits) =/= 0.U)
@@ -537,7 +545,9 @@ class MemAddrCalcUnit(implicit p: Parameters)
   //yh-val store_data = io.req.bits.rs2_data
   //yh+begin
   val effective_address = Mux(io.req.bits.uop.is_bmm,
-                              io.dpt_csrs.wpb_base + (io.req.bits.rs1_data(vaddrBits-1,6) << 0),
+                              //(io.dpt_csrs.wpb_base + (io.req.bits.rs1_data(vaddrBits-1,6) << 3)),
+                              (io.dpt_csrs.wpb_base + (io.req.bits.rs1_data(31,6) << 3)),
+                              //(io.dpt_csrs.wpb_base),
                               Cat(ea_sign, sum(vaddrBits-1,0)).asUInt)
 
   val store_data = Mux(io.req.bits.uop.is_bmm,
@@ -545,12 +555,6 @@ class MemAddrCalcUnit(implicit p: Parameters)
                       ~(1.U << io.req.bits.rs2_data(5,0)),
                       (1.U << io.req.bits.rs2_data(5,0))),
                       io.req.bits.rs2_data)
-
-  when (io.req.valid && io.req.bits.uop.is_bmm) {
-    printf("rs1_data: %x effective_addr: %x rs2_data: %x store_data: %x wbp_base: %x\n",
-            io.req.bits.rs1_data, effective_address, 
-						io.req.bits.rs2_data, store_data, io.dpt_csrs.wpb_base)
-  }
   //yh+end
 
   io.resp.bits.addr := effective_address
@@ -636,8 +640,7 @@ class CapAddrCalcUnit(implicit p: Parameters)
   assert((xLen-tagWidth-1) > vaddrBits/2)
 
   val arena_end = Wire(Vec(31, UInt(16.W)))
-  val num_ways = Wire(Vec(32, UInt(8.W)))
-  //val offset = Wire(Vec(32, UInt(vaddrBits.W)))
+  val num_ways = Wire(Vec(32, UInt(wayAddrSz.W)))
 
   for (i <- 0 until 4) {
     arena_end(i+ 0) := io.dpt_csrs.arena_end_0(16*(i+1)-1,16*i) 
@@ -652,22 +655,75 @@ class CapAddrCalcUnit(implicit p: Parameters)
   arena_end(29) := io.dpt_csrs.arena_end_7(16*(1+1)-1,16*1) 
   arena_end(30) := io.dpt_csrs.arena_end_7(16*(2+1)-1,16*2) 
 
-  for (i <- 0 until 8) {
-    num_ways(i+ 0) := io.dpt_csrs.num_ways_0(8*(i+1)-1, 8*i)
-    num_ways(i+ 8) := io.dpt_csrs.num_ways_1(8*(i+1)-1, 8*i)
-    num_ways(i+16) := io.dpt_csrs.num_ways_2(8*(i+1)-1, 8*i)
-    num_ways(i+24) := io.dpt_csrs.num_ways_3(8*(i+1)-1, 8*i)
+  for (i <- 0 until 4) {
+    num_ways(i+ 0) := io.dpt_csrs.num_ways_0(16*(i+1)-1, 16*i)
+    num_ways(i+ 4) := io.dpt_csrs.num_ways_1(16*(i+1)-1, 16*i)
+    num_ways(i+ 8) := io.dpt_csrs.num_ways_2(16*(i+1)-1, 16*i)
+    num_ways(i+12) := io.dpt_csrs.num_ways_3(16*(i+1)-1, 16*i)
+    num_ways(i+16) := io.dpt_csrs.num_ways_4(16*(i+1)-1, 16*i)
+    num_ways(i+20) := io.dpt_csrs.num_ways_5(16*(i+1)-1, 16*i)
+    num_ways(i+24) := io.dpt_csrs.num_ways_6(16*(i+1)-1, 16*i)
   }
+  num_ways(0+28) := io.dpt_csrs.num_ways_7(16*(0+1)-1, 16*0)
+  num_ways(1+28) := io.dpt_csrs.num_ways_7(16*(1+1)-1, 16*1)
+  num_ways(2+28) := io.dpt_csrs.num_ways_7(16*(2+1)-1, 16*2)
+  num_ways(3+28) := io.dpt_csrs.num_ways_0(16*(0+1)-1, 16*0)
 
   val cmt_size_offset = Reg(Vec(32, UInt(vaddrBits.W)))
-  for (i <- 0 until 32) {
-    cmt_size_offset(i) := (io.dpt_csrs.cmt_size_offset << 25) * i.asUInt
+  val way_offset = Reg(Vec(32, UInt(wayAddrSz.W)))
+
+  when (io.dpt_csrs.way_thres === 0.U) { // 16
+    for (i <- 0 until 31) {
+      cmt_size_offset(i) := ((1.U << 25) * (i >> 1).asUInt)
+    }
+  } .elsewhen (io.dpt_csrs.way_thres === 1.U) { // 24
+    for (i <- 0 until 3) {
+      cmt_size_offset(i+ 0) := ((1.U << 25) * 0.U)
+      cmt_size_offset(i+ 3) := ((1.U << 25) * 1.U)
+      cmt_size_offset(i+ 6) := ((1.U << 25) * 2.U)
+      cmt_size_offset(i+ 9) := ((1.U << 25) * 3.U)
+      cmt_size_offset(i+12) := ((1.U << 25) * 4.U)
+      cmt_size_offset(i+15) := ((1.U << 25) * 5.U)
+      cmt_size_offset(i+18) := ((1.U << 25) * 6.U)
+      cmt_size_offset(i+21) := ((1.U << 25) * 7.U)
+      cmt_size_offset(i+24) := ((1.U << 25) * 8.U)
+      cmt_size_offset(i+27) := ((1.U << 25) * 9.U)
+    }
+    cmt_size_offset(30) := ((1.U << 25) *10.U)
+  } .otherwise { // 32
+    for (i <- 0 until 31) {
+      cmt_size_offset(i) := ((1.U << 25) * (i >> 2).asUInt)
+    }
   }
 
-  //for (i <- 0 until 32) {
-  //  //offset(i) := ((1.U << 25) * i.asUInt)
-  //  offset(i) := (cmt_size * i.asUInt)
-  //}
+  cmt_size_offset(31) := 0.U
+
+  when (io.dpt_csrs.way_thres === 0.U) { // 16
+    for (i <- 0 until 15) {
+      way_offset(2*i+0) := 0.U
+      way_offset(2*i+1) := 8.U
+    }
+    way_offset(30) := 0.U
+  } .elsewhen (io.dpt_csrs.way_thres === 1.U) { // 24
+    for (i <- 0 until 10) {
+      way_offset(3*i+0) := 0.U
+      way_offset(3*i+1) := 8.U
+      way_offset(3*i+2) := 16.U
+    }
+    way_offset(30) := 0.U
+  } .otherwise { // 32
+    for (i <- 0 until 7) {
+      way_offset(4*i+0) := 0.U
+      way_offset(4*i+1) := 8.U
+      way_offset(4*i+2) := 16.U
+      way_offset(4*i+3) := 24.U
+    }
+    way_offset(28) := 0.U
+    way_offset(29) := 8.U
+    way_offset(30) := 16.U
+  }
+
+  way_offset(31) := 0.U
 
   val sel_vec = Wire(Vec(32, Bool()))
 
@@ -676,63 +732,38 @@ class CapAddrCalcUnit(implicit p: Parameters)
   }
   sel_vec(31) := true.B
 
-  val idx = PriorityEncoder(RegNext(sel_vec))
+  val idx = RegNext(PriorityEncoder(sel_vec))
+  val max_num_ways = io.dpt_csrs.max_num_ways
+  val tag_offset = Reg(UInt(vaddrBits.W))
+  tag_offset := Mux(max_num_ways === 1.U, tag << 7, // 8
+                Mux(max_num_ways === 2.U, tag << 8, // 16
+                Mux(max_num_ways === 4.U, tag << 9, // 32
+                Mux(max_num_ways === 8.U, tag << 10, // 64
+                Mux(max_num_ways === 16.U, tag << 11, // 128
+                                          tag << 12))))) // 256
 
   val cap_resp_val = Reg(Bool())
   val cap_resp = Reg(new FuncUnitCapResp(dataWidth))
-  cap_resp_val := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
+  cap_resp_val := (io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop) && !io.req.bits.kill)
   cap_resp.uop := io.req.bits.uop
   cap_resp.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
 	cap_resp.tag := tag
 	cap_resp.tagged := tagged
-	//TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
-	//cap_resp.dir := true.B
 	cap_resp.addr := addr
   cap_resp.data := io.req.bits.rs2_data(vaddrBits-1,0)
-  //val cmt_addr = (io.dpt_csrs.cmt_base + offset(idx) + (cap_resp.tag << 9))
-  val cmt_addr = (io.dpt_csrs.cmt_base + cmt_size_offset(idx) + (cap_resp.tag << 9))
 
-  io.cap_resp.valid := (cap_resp_val & !IsKilledByBranch(io.brupdate, cap_resp.uop))
+  val cmt_addr = (io.dpt_csrs.cmt_base + cmt_size_offset(idx) + tag_offset)
+  io.cap_resp.valid := (cap_resp_val && !IsKilledByBranch(io.brupdate, cap_resp.uop) && !io.req.bits.kill)
   io.cap_resp.bits.uop := cap_resp.uop
   io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, cap_resp.uop)
 	io.cap_resp.bits.tag := cap_resp.tag
 	io.cap_resp.bits.tagged := cap_resp.tagged
-	//TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
-	//io.cap_resp.bits.dir := true.B
 	io.cap_resp.bits.addr := cap_resp.addr
   io.cap_resp.bits.data := cap_resp.data
 	io.cap_resp.bits.cmt_addr := cmt_addr
 	io.cap_resp.bits.num_ways := num_ways(idx)
-
-  //io.cap_resp.valid := io.req.valid && !IsKilledByBranch(io.brupdate, io.req.bits.uop)
-  //io.cap_resp.bits.uop := io.req.bits.uop
-  //io.cap_resp.bits.uop.br_mask := GetNewBrMask(io.brupdate, io.req.bits.uop)
-	//io.cap_resp.bits.tag := tag
-	//io.cap_resp.bits.tagged := tagged
-	////TODO io.cap_resp.bits.dir := (is_cstr || (is_cclr && sum(vaddrBits-1,32) === 0.U)) // 1: forward 0: backward
-	//io.cap_resp.bits.dir := true.B
-	//io.cap_resp.bits.addr := addr
-  //io.cap_resp.bits.data := io.req.bits.rs2_data(vaddrBits-1,0)
-
-  when (io.req.valid) {
-    when (is_cstr) {
-      printf("Found CSTR tag: %x addr: %x rs1_data: %x rs2_data: %x\n",
-              tag, addr, io.req.bits.rs1_data, io.req.bits.rs2_data)
-    } .elsewhen (is_cclr) {
-      printf("Found CCLR tag: %x addr: %x rs1_data: %x rs2_data: %x\n",
-              tag, addr, io.req.bits.rs1_data, io.req.bits.rs2_data)
-    }
-
-    for (i <- 0 until 4) { printf("arena_end(%d): %x ", i.asUInt, arena_end(i)) }
-    printf("\n")
-    for (i <- 0 until 4) { printf("num_ways(%d): %d ", i.asUInt, num_ways(i)) }
-    printf("\n")
-  }
-
-  when (cap_resp_val) {
-    printf("cmt_base: %x tag: %x addr: %x idx: %d cmt_addr: %x num_ways: %d\n", 
-            io.dpt_csrs.cmt_base, cap_resp.tag, cap_resp.addr, idx.asUInt, cmt_addr, num_ways(idx))
-  }
+	io.cap_resp.bits.start_way := way_offset(idx)
+	io.cap_resp.bits.idx := Mux((idx != 31).asBool, idx, 0.U)
 }
 //yh+end
 

@@ -106,10 +106,10 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   val uses_ldq         = Bool()
   val uses_stq         = Bool()
   //yh+begin
-  val needCC		       = Bool()
-  val is_cap           = Bool()
+  val needCC		       = Bool() // Does need capability checks?
+  val is_cap           = Bool() // Is instruction (or memory request) requiring capability operations?
   val cap_cmd          = UInt(2.W)
-  val is_bmm           = Bool()
+  val is_bmm           = Bool() // Is bitmap manipulation instruction?
   //yh+end
   val is_sys_pc2epc    = Bool()                      // Is a ECall or Breakpoint -- both set EPC to PC.
   val is_unique        = Bool()                      // only allow this instruction in the pipeline, wait for STQ to

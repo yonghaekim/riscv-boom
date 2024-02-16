@@ -603,7 +603,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                  RegNext(s0_valid(w)                                     &&
                          !IsKilledByBranch(io.lsu.brupdate, s0_req(w).uop) &&
                          !(io.lsu.exception && s0_req(w).uop.uses_ldq)   &&
-                         //!(io.lsu.exception && (s0_req(w).uop.uses_ldq || s0_req(w).uop.is_capld))   && //yh+
                          !(s2_store_failed && io.lsu.req.fire && s0_req(w).uop.uses_stq),
                          init=false.B))
   for (w <- 0 until memWidth)
@@ -635,7 +634,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                          !io.lsu.s1_kill(w) &&
                          !IsKilledByBranch(io.lsu.brupdate, s1_req(w).uop) &&
                          !(io.lsu.exception && s1_req(w).uop.uses_ldq) &&
-                         //!(io.lsu.exception && (s1_req(w).uop.uses_ldq || s1_req(w).uop.is_capld)) && //yh+
                          !(s2_store_failed && (s1_type === t_lsu) && s1_req(w).uop.uses_stq)))
   for (w <- 0 until memWidth)
     s2_req(w).uop.br_mask := GetNewBrMask(io.lsu.brupdate, s1_req(w).uop)
@@ -701,9 +699,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     }
   }
   //yh-assert(debug_sc_fail_cnt < 100.U, "L1DCache failed too many SCs in a row")
-  //assert(debug_sc_fail_cnt < 300.U, "L1DCache failed too many SCs in a row") //yh+
-
-  //printf("encRowBits: %d\n", encRowBits.asUInt) //yh+
 
   val s2_data = Wire(Vec(memWidth, Vec(nWays, UInt(encRowBits.W))))
   for (i <- 0 until memWidth) {
@@ -862,14 +857,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     //yh-io.lsu.resp(w).valid := resp(w).valid &&
     io.lsu.resp(w).valid := resp(w).valid && !resp(w).bits.uop.is_cap && //yh+
                             !(io.lsu.exception && resp(w).bits.uop.uses_ldq) &&
-                            //!(io.lsu.exception && (resp(w).bits.uop.uses_ldq || resp(w).bits.uop.is_capld)) && //yh+
                             !IsKilledByBranch(io.lsu.brupdate, resp(w).bits.uop)
     io.lsu.resp(w).bits  := UpdateBrMask(io.lsu.brupdate, resp(w).bits)
 
     //yh-io.lsu.nack(w).valid := s2_valid(w) && s2_send_nack(w) &&
     io.lsu.nack(w).valid := s2_valid(w) && s2_send_nack(w) && !s2_req(w).uop.is_cap && //yh+
                             !(io.lsu.exception && s2_req(w).uop.uses_ldq) &&
-                            //!(io.lsu.exception && (s2_req(w).uop.uses_ldq || s2_req(w).uop.is_capld)) && //yh+
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
     io.lsu.nack(w).bits  := UpdateBrMask(io.lsu.brupdate, s2_req(w))
     assert(!(io.lsu.nack(w).valid && s2_type =/= t_lsu))
@@ -877,13 +870,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 		//yh+begin
     io.lsu.cap_resp(w).valid := resp(w).valid && resp(w).bits.uop.is_cap &&
                             		!(io.lsu.exception && resp(w).bits.uop.uses_ldq) &&
-                            		//!(io.lsu.exception && (resp(w).bits.uop.uses_ldq || resp(w).bits.uop.is_capld)) && //yh+
 				                        !IsKilledByBranch(io.lsu.brupdate, resp(w).bits.uop)
     io.lsu.cap_resp(w).bits  := UpdateBrMask(io.lsu.brupdate, resp(w).bits)
 
     io.lsu.cap_nack(w).valid := s2_valid(w) && s2_send_nack(w) && s2_req(w).uop.is_cap &&
 			  	                      !(io.lsu.exception && s2_req(w).uop.uses_ldq) &&
-			  	                      //!(io.lsu.exception && (s2_req(w).uop.uses_ldq || s2_req(w).uop.is_capld)) && //yh+
 				                        !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
     io.lsu.cap_nack(w).bits  := UpdateBrMask(io.lsu.brupdate, s2_req(w))
 		//yh+end
